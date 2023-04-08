@@ -26,12 +26,16 @@ enum Payload {
         node_id: String,
         node_ids: Vec<String>,
     },
-    InitOk {},
+    InitOk,
     Echo {
         echo: String,
     },
     EchoOk {
         echo: String,
+    },
+    Generate,
+    GenerateOk {
+        id: String,
     },
 }
 
@@ -42,33 +46,32 @@ struct Node {
 
 impl Node {
     fn step(&mut self, req: Message) -> Vec<Message> {
-        let body = match req.body.payload {
+        let payload = match req.body.payload {
             Payload::Init { node_id, .. } => {
                 self.id = node_id;
-                MessageBody {
-                    msg_id: Some(self.msg_counter),
-                    in_reply_to: req.body.msg_id,
-                    payload: Payload::InitOk {},
-                }
+                Payload::InitOk
             }
             Payload::InitOk {} => panic!("unexpected message type InitOk received"),
-            Payload::Echo { echo } => MessageBody {
-                msg_id: Some(self.msg_counter),
-                in_reply_to: req.body.msg_id,
-                payload: Payload::EchoOk { echo },
-            },
+            Payload::Echo { echo } => Payload::EchoOk { echo },
             Payload::EchoOk { .. } => {
                 return vec![];
             }
+            Payload::Generate => Payload::GenerateOk {
+                id: format!("{}x{}", self.id, self.msg_counter),
+            },
+            Payload::GenerateOk { .. } => panic!("unexpected message type GenerateOk received"),
         };
-
-        self.msg_counter += 1;
 
         let resp = Message {
             src: req.dest,
             dest: req.src,
-            body,
+            body: MessageBody {
+                msg_id: Some(self.msg_counter),
+                in_reply_to: req.body.msg_id,
+                payload,
+            },
         };
+        self.msg_counter += 1;
 
         vec![resp]
     }
@@ -87,11 +90,11 @@ fn main() -> Result<()> {
         let line_str = line.context("read line")?;
         let req: Message =
             serde_json::from_str(&line_str).context("serde deserialize msg from STDIN")?;
-        dbg!("incomming message:", req.clone(), line_str);
+        // dbg!("incomming message:", req.clone(), line_str);
         let responses = node.step(req);
         for resp in responses {
             let serialized_msg = serde_json::to_string(&resp).context("serialize Message")? + "\n";
-            dbg!(resp, serialized_msg.clone());
+            // dbg!(resp, serialized_msg.clone());
             stdout.write_all(serialized_msg.as_bytes())?;
             stdout.flush()?;
         }
