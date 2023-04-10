@@ -1,6 +1,6 @@
 use anyhow::{Context, Ok, Result};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, BufRead, Write},
 };
 
@@ -58,7 +58,7 @@ struct Node {
     id: String,
     peer_ids: Vec<String>,
     msg_counter: usize,
-    msg_read: Vec<usize>,
+    msg_read: HashSet<usize>,
 }
 
 impl Node {
@@ -78,12 +78,15 @@ impl Node {
                 id: format!("{}x{}", self.id, self.msg_counter),
             },
             Payload::GenerateOk { .. } => panic!("unexpected message type GenerateOk received"),
-            Payload::Broadcast { .. } => Payload::BroadcastOk,
+            Payload::Broadcast { message } => {
+                self.msg_read.insert(message);
+                Payload::BroadcastOk
+            }
             Payload::BroadcastOk => {
                 return vec![];
             }
             Payload::Read => Payload::ReadOk {
-                messages: self.msg_read.clone(),
+                messages: self.msg_read.clone().into_iter().collect(),
             },
             Payload::ReadOk { .. } => {
                 return vec![];
@@ -132,8 +135,8 @@ fn main() -> Result<()> {
     let mut node = Node {
         id: "uninitialized-node-id".to_string(),
         msg_counter: 0,
-        msg_read: vec![],
-        peer_ids: vec![],
+        msg_read: HashSet::new(),
+        peer_ids: Vec::new(),
     };
 
     for line in stdin.lines() {
