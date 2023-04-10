@@ -1,5 +1,8 @@
 use anyhow::{Context, Ok, Result};
-use std::io::{self, BufRead, Write};
+use std::{
+    collections::HashMap,
+    io::{self, BufRead, Write},
+};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -37,18 +40,33 @@ enum Payload {
     GenerateOk {
         id: String,
     },
+    Broadcast {
+        message: usize,
+    },
+    BroadcastOk,
+    Read,
+    ReadOk {
+        messages: Vec<usize>,
+    },
+    Topology {
+        topology: HashMap<String, Vec<String>>,
+    },
+    TopologyOk,
 }
 
 struct Node {
     id: String,
+    peer_ids: Vec<String>,
     msg_counter: usize,
+    msg_read: Vec<usize>,
 }
 
 impl Node {
     fn step(&mut self, req: Message) -> Vec<Message> {
-        let payload = match req.body.payload {
-            Payload::Init { node_id, .. } => {
+        let payload = match req.body.payload.clone() {
+            Payload::Init { node_id, node_ids } => {
                 self.id = node_id;
+                self.peer_ids = node_ids;
                 Payload::InitOk
             }
             Payload::InitOk {} => panic!("unexpected message type InitOk received"),
@@ -60,9 +78,39 @@ impl Node {
                 id: format!("{}x{}", self.id, self.msg_counter),
             },
             Payload::GenerateOk { .. } => panic!("unexpected message type GenerateOk received"),
+            Payload::Broadcast { .. } => Payload::BroadcastOk,
+            Payload::BroadcastOk => {
+                return vec![];
+            }
+            Payload::Read => Payload::ReadOk {
+                messages: self.msg_read.clone(),
+            },
+            Payload::ReadOk { .. } => {
+                return vec![];
+            }
+            Payload::Topology { .. } => Payload::TopologyOk,
+            Payload::TopologyOk => {
+                return vec![];
+            }
         };
 
-        let resp = Message {
+        let mut resp = vec![];
+        if let Payload::Broadcast { message } = req.body.payload {
+            for peer_id in &self.peer_ids {
+                resp.push(Message {
+                    src: req.dest.clone(),
+                    dest: peer_id.clone(),
+                    body: MessageBody {
+                        msg_id: Some(self.msg_counter),
+                        in_reply_to: None,
+                        payload: Payload::Broadcast { message },
+                    },
+                });
+                self.msg_counter += 1;
+            }
+        }
+
+        resp.push(Message {
             src: req.dest,
             dest: req.src,
             body: MessageBody {
@@ -70,10 +118,10 @@ impl Node {
                 in_reply_to: req.body.msg_id,
                 payload,
             },
-        };
-        self.msg_counter += 1;
+        });
 
-        vec![resp]
+        self.msg_counter += 1;
+        resp
     }
 }
 
@@ -84,10 +132,13 @@ fn main() -> Result<()> {
     let mut node = Node {
         id: "uninitialized-node-id".to_string(),
         msg_counter: 0,
+        msg_read: vec![],
+        peer_ids: vec![],
     };
 
     for line in stdin.lines() {
         let line_str = line.context("read line")?;
+        // dbg!("incomming message:", &line_str);
         let req: Message =
             serde_json::from_str(&line_str).context("serde deserialize msg from STDIN")?;
         // dbg!("incomming message:", req.clone(), line_str);
