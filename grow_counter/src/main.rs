@@ -1,4 +1,7 @@
+mod seqkv;
 use anyhow::{Context, Ok, Result};
+use std::sync::{mpsc, Arc, RwLock};
+use std::thread;
 use std::{
     collections::{HashMap, HashSet},
     io::{self, BufRead, Write},
@@ -34,6 +37,20 @@ enum Payload {
         topology: HashMap<String, Vec<String>>,
     },
     TopologyOk,
+    // Add {
+    //     delta: usize,
+    // },
+    // AddOk,
+    // Read,
+    // ReadOk {
+    //     value: usize,
+    // },
+    Echo {
+        echo: String,
+    },
+    EchoOk {
+        echo: String,
+    },
 }
 
 struct Node {
@@ -61,6 +78,10 @@ impl Node {
             Payload::TopologyOk => {
                 return vec![];
             }
+            Payload::Echo { echo } => Payload::EchoOk { echo },
+            Payload::EchoOk { .. } => {
+                return vec![];
+            }
         };
 
         let mut resp = vec![];
@@ -80,7 +101,7 @@ impl Node {
 }
 
 fn main() -> Result<()> {
-    let stdin = io::stdin().lock();
+    // let stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
 
     let mut node = Node {
@@ -89,12 +110,10 @@ fn main() -> Result<()> {
         peer_ids: Vec::new(),
     };
 
-    for line in stdin.lines() {
-        let line_str = line.context("read line")?;
-        // dbg!("incomming message:", &line_str);
-        let req: Message =
-            serde_json::from_str(&line_str).context("serde deserialize msg from STDIN")?;
-        // dbg!("incomming message:", req.clone(), line_str);
+    let (tx, rx) = mpsc::sync_channel(1);
+    let _router = Router::new(tx);
+
+    for req in rx {
         let responses = node.step(req);
         for resp in responses {
             let serialized_msg = serde_json::to_string(&resp).context("serialize Message")? + "\n";
@@ -103,5 +122,51 @@ fn main() -> Result<()> {
             stdout.flush()?;
         }
     }
+
     Ok(())
+}
+struct Router {
+    msg_id_handles: Arc<RwLock<HashMap<usize, mpsc::SyncSender<Message>>>>,
+}
+
+impl Router {
+    fn new(req_chan: mpsc::SyncSender<Message>) -> Self {
+        let s = Self {
+            msg_id_handles: Arc::new(RwLock::new(HashMap::new())),
+        };
+
+        let handles = s.msg_id_handles.clone();
+
+        thread::spawn(move || {
+            let stdin = io::stdin().lock();
+            for line in stdin.lines() {
+                let msg: Message = serde_json::from_str(&line.unwrap()).unwrap();
+                if let Some(in_reply_to) = msg.body.in_reply_to {
+                    // A) response to my request
+                    // A1) there is no registered handle -> NOOP
+                    // A2) notify registered handle
+                    let mut h = handles.write().unwrap();
+                    if let Some(handle) = h.get(&in_reply_to) {
+                        // notify registered handle
+                        handle.send(msg).unwrap();
+                        // remove the handle
+                        h.remove(&in_reply_to);
+                    } else {
+                        // there is no registered handle -> NOOP
+                    }
+                } else {
+                    // B) incoming request
+                    // - notify system
+                    req_chan.send(msg).unwrap();
+                }
+            }
+        });
+
+        s
+    }
+
+    fn register_msg_id_handle(&self, msg_id: usize, sender: mpsc::SyncSender<Message>) {
+        let mut handles = self.msg_id_handles.write().unwrap();
+        handles.insert(msg_id, sender);
+    }
 }
