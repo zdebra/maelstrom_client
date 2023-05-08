@@ -19,5 +19,8 @@ broadcast2: build
 echo2: build
 	$(MAELSTROM_BINARY) test -w echo --bin $(GROW_COUNTER_BINARY) --node-count 1 --time-limit 10 --log-stderr
 
+counter: build
+	$(MAELSTROM_BINARY) test -w g-counter --bin $(GROW_COUNTER_BINARY) --node-count 3 --rate 100 --time-limit 20 --nemesis partition --log-stderr
+
 build:
 	cargo build
