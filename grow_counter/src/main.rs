@@ -1,14 +1,11 @@
-use anyhow::{Context, Ok, Result};
+use anyhow::{Context, Result};
 use core::panic;
-use std::future::Future;
-use std::rc::Rc;
-use std::sync::{mpsc, Arc, RwLock};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io::{self, BufRead, Write},
 };
-use tokio::time::{sleep, Duration};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -45,7 +42,7 @@ enum Payload {
     },
     AddOk,
     Read {
-        key: String,
+        key: Option<String>,
     },
     ReadOk {
         value: usize,
@@ -63,33 +60,43 @@ enum Payload {
         to: usize,
     },
     CasOk,
+    Error {
+        code: usize,
+        text: String,
+    },
 }
 
-struct Node {
+struct Node<'a> {
     id: String,
     peer_ids: Vec<String>,
     msg_counter: usize,
-    msg_receiver: MsgReceiver,
-    msg_sender: MsgSender,
+    msg_receiver: &'a MsgReceiver,
+    msg_sender: &'a MsgSender,
     response_collector: ResponseCollector,
 }
 
 const GLOBAL_COUNTER_KEY: &str = "my-counter";
 const SEQ_KV_SVC: &str = "seq-kv";
 
-impl Node {
+impl<'a> Node<'a> {
     async fn step(&mut self) {
         // blocking receive
         let msg = self.msg_receiver.receive();
 
+        eprintln!("received msg: {:?}", msg);
+
         // handle response
         if let Some(in_reply_to) = msg.body.in_reply_to {
+            eprintln!("hadnling resposne...");
             self.response_collector.put_response(in_reply_to, msg);
             return;
         }
 
+        eprintln!("handling request");
+
         // handle request
         let payload = match msg.body.payload.clone() {
+            Payload::Error { .. } => panic!("unexpected branch of code"),
             Payload::Init { node_id, node_ids } => {
                 self.id = node_id;
                 self.peer_ids = node_ids.clone();
@@ -111,27 +118,34 @@ impl Node {
                 return;
             }
             Payload::Add { delta } => {
+                eprintln!("handling add delta {}", delta);
                 let read_id = {
                     let r_id = self.get_counter_and_increase();
-                    self.msg_sender.send(Message {
+                    let read_kv_msg = Message {
                         src: self.id.clone(),
                         dest: SEQ_KV_SVC.to_string(),
                         body: MessageBody {
                             msg_id: Some(r_id),
                             in_reply_to: None,
                             payload: Payload::Read {
-                                key: GLOBAL_COUNTER_KEY.to_string(),
+                                key: Some(GLOBAL_COUNTER_KEY.to_string()),
                             },
                         },
-                    });
+                    };
+                    eprintln!("sending msg to seq-kv {:?}", read_kv_msg);
+                    self.msg_sender.send(read_kv_msg);
                     r_id
                 };
+
+                eprintln!("awaiting response for msg id {}", read_id);
 
                 let read_resp = self.response_collector.take(read_id).await;
                 let global_counter = match read_resp.body.payload {
                     Payload::ReadOk { value } => value,
                     _ => panic!("unexpected response: {:?}", read_resp),
                 };
+
+                eprintln!("received global counter value {}", global_counter);
 
                 let cas_id = {
                     let id = self.get_counter_and_increase();
@@ -160,34 +174,39 @@ impl Node {
             Payload::AddOk => {
                 panic!("unexpected branch of code")
             }
-            Payload::Read { key } => {
+            Payload::Read { .. } => {
+                eprintln!("handling read...");
                 let read_id = {
                     let r_id = self.get_counter_and_increase();
-                    self.msg_sender.send(Message {
+                    let read_msg = Message {
                         src: self.id.clone(),
                         dest: SEQ_KV_SVC.to_string(),
                         body: MessageBody {
                             msg_id: Some(r_id),
                             in_reply_to: None,
                             payload: Payload::Read {
-                                key: GLOBAL_COUNTER_KEY.to_string(),
+                                key: Some(GLOBAL_COUNTER_KEY.to_string()),
                             },
                         },
-                    });
+                    };
+                    eprintln!("sending msg to seqkv {:?}", read_msg);
+                    self.msg_sender.send(read_msg);
                     r_id
                 };
 
+                eprintln!("awaiting read response {}", read_id);
                 let read_resp = self.response_collector.take(read_id).await;
                 let global_counter = match read_resp.body.payload {
                     Payload::ReadOk { value } => value,
                     _ => panic!("unexpected response: {:?}", read_resp),
                 };
+                eprintln!("received global counter value {}", global_counter);
                 Payload::ReadOk {
                     value: global_counter,
                 }
             }
-            Payload::ReadOk { value } => panic!("unexpected branch of code"),
-            Payload::Cas { key, from, to } => panic!("unexpected branch of code"),
+            Payload::ReadOk { .. } => panic!("unexpected branch of code"),
+            Payload::Cas { .. } => panic!("unexpected branch of code"),
             Payload::CasOk => panic!("unexpected branch of code"),
         };
 
@@ -212,24 +231,24 @@ impl Node {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let msg_receiver = MsgReceiver::new();
-    let msg_sender = MsgSender::new();
-
-    let mut node = Node {
+    let node = Arc::new(&mut Node {
         id: "uninitialized-node-id".to_string(),
         msg_counter: 0,
         peer_ids: Vec::new(),
-        msg_receiver: msg_receiver,
-        msg_sender: msg_sender,
+        msg_receiver: &MsgReceiver::new(),
+        msg_sender: &MsgSender::new(),
         response_collector: ResponseCollector::new(),
-    };
+    });
 
     loop {
-        node.step().await;
+        tokio::spawn(async move {
+            eprintln!("step!");
+            node.step().await;
+        });
     }
 }
 struct MsgReceiver {
-    receiver_ch: mpsc::Receiver<Message>,
+    receiver_ch: Arc<mpsc::Receiver<Message>>,
 }
 
 impl MsgReceiver {
@@ -239,13 +258,14 @@ impl MsgReceiver {
         thread::spawn(move || {
             let stdin = io::stdin().lock();
             for line in stdin.lines() {
-                let msg: Message = serde_json::from_str(&line.unwrap()).unwrap();
+                let msg: Message =
+                    serde_json::from_str(&line.unwrap()).expect("parsing received msg");
                 reciever_in.send(msg).expect("send parsed msg");
             }
         });
 
         Self {
-            receiver_ch: reciever_out,
+            receiver_ch: Arc::new(reciever_out),
         }
     }
 
