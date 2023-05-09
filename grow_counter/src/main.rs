@@ -1,10 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use core::panic;
-use std::sync::{mpsc, Arc};
-use std::thread;
+use tokio::sync::Mutex;
+
 use std::{
     collections::HashMap,
     io::{self, BufRead, Write},
+    sync::Arc,
 };
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -66,25 +67,26 @@ enum Payload {
     },
 }
 
-struct Node<'a> {
+struct Node {
     id: String,
     peer_ids: Vec<String>,
     msg_counter: usize,
-    msg_receiver: &'a MsgReceiver,
-    msg_sender: &'a MsgSender,
     response_collector: ResponseCollector,
 }
 
 const GLOBAL_COUNTER_KEY: &str = "my-counter";
 const SEQ_KV_SVC: &str = "seq-kv";
 
-impl<'a> Node<'a> {
-    async fn step(&mut self) {
-        // blocking receive
-        let msg = self.msg_receiver.receive();
-
-        eprintln!("received msg: {:?}", msg);
-
+impl Node {
+    fn new() -> Self {
+        Self {
+            id: "uninitialized-node-id".to_string(),
+            msg_counter: 0,
+            peer_ids: Vec::new(),
+            response_collector: ResponseCollector::new(),
+        }
+    }
+    async fn step(&mut self, msg: Message) {
         // handle response
         if let Some(in_reply_to) = msg.body.in_reply_to {
             eprintln!("hadnling resposne...");
@@ -133,7 +135,7 @@ impl<'a> Node<'a> {
                         },
                     };
                     eprintln!("sending msg to seq-kv {:?}", read_kv_msg);
-                    self.msg_sender.send(read_kv_msg);
+                    send_msg(read_kv_msg);
                     r_id
                 };
 
@@ -149,7 +151,7 @@ impl<'a> Node<'a> {
 
                 let cas_id = {
                     let id = self.get_counter_and_increase();
-                    self.msg_sender.send(Message {
+                    send_msg(Message {
                         src: self.id.clone(),
                         dest: SEQ_KV_SVC.to_string(),
                         body: MessageBody {
@@ -190,7 +192,7 @@ impl<'a> Node<'a> {
                         },
                     };
                     eprintln!("sending msg to seqkv {:?}", read_msg);
-                    self.msg_sender.send(read_msg);
+                    send_msg(read_msg);
                     r_id
                 };
 
@@ -211,7 +213,7 @@ impl<'a> Node<'a> {
         };
 
         let resp_id = self.get_counter_and_increase();
-        self.msg_sender.send(Message {
+        send_msg(Message {
             src: msg.dest,
             dest: msg.src,
             body: MessageBody {
@@ -231,78 +233,37 @@ impl<'a> Node<'a> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let node = Arc::new(&mut Node {
-        id: "uninitialized-node-id".to_string(),
-        msg_counter: 0,
-        peer_ids: Vec::new(),
-        msg_receiver: &MsgReceiver::new(),
-        msg_sender: &MsgSender::new(),
-        response_collector: ResponseCollector::new(),
-    });
+    let node = Arc::new(Mutex::new(Node::new()));
 
     loop {
+        let node = node.clone();
+
+        // blocking receive
+        let msg = receive_msg();
         tokio::spawn(async move {
+            eprintln!("received msg: {:?}", msg);
+
             eprintln!("step!");
-            node.step().await;
+            let mut guard = node.lock().await;
+            guard.step(msg).await;
         });
     }
 }
-struct MsgReceiver {
-    receiver_ch: Arc<mpsc::Receiver<Message>>,
+// what you should do then is make step spawn a task everytime it's done reading a message, and make that task handle that message.
+
+fn receive_msg() -> Message {
+    let mut stdin = io::stdin().lock();
+    let mut line = String::new();
+    stdin.read_line(&mut line).expect("read line");
+    let msg: Message = serde_json::from_str(&line).expect("parsing received msg");
+    msg
 }
 
-impl MsgReceiver {
-    fn new() -> Self {
-        let (reciever_in, reciever_out) = mpsc::sync_channel(0);
-
-        thread::spawn(move || {
-            let stdin = io::stdin().lock();
-            for line in stdin.lines() {
-                let msg: Message =
-                    serde_json::from_str(&line.unwrap()).expect("parsing received msg");
-                reciever_in.send(msg).expect("send parsed msg");
-            }
-        });
-
-        Self {
-            receiver_ch: Arc::new(reciever_out),
-        }
-    }
-
-    fn receive(&self) -> Message {
-        self.receiver_ch
-            .recv()
-            .expect("receive msg from stdin wrapper")
-    }
-}
-
-struct MsgSender {
-    stdout_sender: mpsc::SyncSender<Message>,
-}
-
-impl MsgSender {
-    fn new() -> Self {
-        let (stdout_sender, stdout_receiver) = mpsc::sync_channel(0);
-        thread::spawn(move || {
-            let mut stdout = io::stdout().lock();
-            loop {
-                let msg: Message = stdout_receiver.recv().expect("recv msg for writing");
-                let serialized_msg = serde_json::to_string(&msg)
-                    .context("serialize Message")
-                    .unwrap()
-                    + "\n";
-                stdout.write_all(serialized_msg.as_bytes()).unwrap();
-                stdout.flush().unwrap();
-            }
-        });
-        Self { stdout_sender }
-    }
-
-    fn send(&self, msg: Message) {
-        self.stdout_sender
-            .send(msg)
-            .expect("send_and_forget send msg");
-    }
+fn send_msg(msg: Message) {
+    let mut stdout = io::stdout().lock();
+    let serialized_msg = serde_json::to_string(&msg).expect("serialize Message") + "\n";
+    stdout.write_all(serialized_msg.as_bytes()).unwrap();
+    stdout.flush();
 }
 
 struct ResponseCollector {
