@@ -65,6 +65,11 @@ enum Payload {
         code: usize,
         text: String,
     },
+    Write {
+        key: String,
+        value: usize,
+    },
+    WriteOk,
 }
 
 struct Node {
@@ -89,7 +94,7 @@ impl Node {
     async fn step(&mut self, msg: Message) {
         // handle response
         if let Some(in_reply_to) = msg.body.in_reply_to {
-            eprintln!("hadnling resposne...");
+            eprintln!("handling resposne...");
             self.response_collector.put_response(in_reply_to, msg);
             return;
         }
@@ -98,11 +103,40 @@ impl Node {
 
         // handle request
         let payload = match msg.body.payload.clone() {
+            Payload::Write { .. } => panic!("unexpected branch of code"),
+            Payload::WriteOk { .. } => panic!("unexpected branch of code"),
             Payload::Error { .. } => panic!("unexpected branch of code"),
             Payload::Init { node_id, node_ids } => {
                 self.id = node_id;
                 self.peer_ids = node_ids.clone();
 
+                eprintln!("init global counter...");
+                let write_id = {
+                    let id = self.get_counter_and_increase();
+                    send_msg(Message {
+                        src: self.id.clone(),
+                        dest: SEQ_KV_SVC.to_string(),
+                        body: MessageBody {
+                            msg_id: Some(id),
+                            in_reply_to: None,
+                            payload: Payload::Write {
+                                key: SEQ_KV_SVC.to_string(),
+                                value: 0,
+                            },
+                        },
+                    });
+                    id
+                };
+
+                eprintln!("awaiting init global counter msg with id {}", write_id);
+
+                let write_resp = self.response_collector.take(write_id).await;
+                match write_resp.body.payload {
+                    Payload::WriteOk => {
+                        eprintln!("global counter initialized!");
+                    }
+                    _ => panic!("couldn't init global counter"),
+                }
                 Payload::InitOk
             }
             Payload::InitOk {} => panic!("unexpected message type InitOk received"),
@@ -121,23 +155,9 @@ impl Node {
             }
             Payload::Add { delta } => {
                 eprintln!("handling add delta {}", delta);
-                let read_id = {
-                    let r_id = self.get_counter_and_increase();
-                    let read_kv_msg = Message {
-                        src: self.id.clone(),
-                        dest: SEQ_KV_SVC.to_string(),
-                        body: MessageBody {
-                            msg_id: Some(r_id),
-                            in_reply_to: None,
-                            payload: Payload::Read {
-                                key: Some(GLOBAL_COUNTER_KEY.to_string()),
-                            },
-                        },
-                    };
-                    eprintln!("sending msg to seq-kv {:?}", read_kv_msg);
-                    send_msg(read_kv_msg);
-                    r_id
-                };
+
+                let read_id = self.get_counter_and_increase();
+                send_global_counter_read(read_id, self.id.clone());
 
                 eprintln!("awaiting response for msg id {}", read_id);
 
@@ -178,23 +198,9 @@ impl Node {
             }
             Payload::Read { .. } => {
                 eprintln!("handling read...");
-                let read_id = {
-                    let r_id = self.get_counter_and_increase();
-                    let read_msg = Message {
-                        src: self.id.clone(),
-                        dest: SEQ_KV_SVC.to_string(),
-                        body: MessageBody {
-                            msg_id: Some(r_id),
-                            in_reply_to: None,
-                            payload: Payload::Read {
-                                key: Some(GLOBAL_COUNTER_KEY.to_string()),
-                            },
-                        },
-                    };
-                    eprintln!("sending msg to seqkv {:?}", read_msg);
-                    send_msg(read_msg);
-                    r_id
-                };
+
+                let read_id = self.get_counter_and_increase();
+                send_global_counter_read(read_id, self.id.clone());
 
                 eprintln!("awaiting read response {}", read_id);
                 let read_resp = self.response_collector.take(read_id).await;
@@ -240,10 +246,9 @@ async fn main() -> Result<()> {
 
         // blocking receive
         let msg = receive_msg();
+        eprintln!("received msg: {:?}", msg);
         tokio::spawn(async move {
-            eprintln!("received msg: {:?}", msg);
-
-            eprintln!("step!");
+            eprintln!("task was spawned");
             let mut guard = node.lock().await;
             guard.step(msg).await;
         });
@@ -264,6 +269,22 @@ fn send_msg(msg: Message) {
     let serialized_msg = serde_json::to_string(&msg).expect("serialize Message") + "\n";
     stdout.write_all(serialized_msg.as_bytes()).unwrap();
     stdout.flush();
+}
+
+fn send_global_counter_read(msg_id: usize, src: String) {
+    let read_kv_msg = Message {
+        src: src,
+        dest: SEQ_KV_SVC.to_string(),
+        body: MessageBody {
+            msg_id: Some(msg_id),
+            in_reply_to: None,
+            payload: Payload::Read {
+                key: Some(GLOBAL_COUNTER_KEY.to_string()),
+            },
+        },
+    };
+    eprintln!("sending msg to seq-kv {:?}", read_kv_msg);
+    send_msg(read_kv_msg);
 }
 
 struct ResponseCollector {
