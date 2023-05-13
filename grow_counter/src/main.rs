@@ -1,4 +1,6 @@
 mod counter;
+mod node_manager;
+mod response_collector;
 
 use anyhow::Result;
 use core::panic;
@@ -79,8 +81,8 @@ const SEQ_KV_SVC: &str = "seq-kv";
 
 async fn process_msg(
     msg: Message,
-    response_tx: Sender<RespColCommand>,
-    node_tx: Sender<NodeCommands>,
+    response_tx: Sender<response_collector::Command>,
+    node_tx: Sender<node_manager::Commands>,
     msg_cnt: Arc<Mutex<usize>>,
     counter_tx: Sender<counter::Commands>,
 ) {
@@ -88,7 +90,7 @@ async fn process_msg(
     if let Some(in_reply_to) = msg.body.in_reply_to {
         eprintln!("handling response...");
         response_tx
-            .send(RespColCommand::Put {
+            .send(response_collector::Command::Put {
                 msg_id: in_reply_to,
                 msg,
             })
@@ -99,7 +101,7 @@ async fn process_msg(
 
     eprintln!("handling request");
 
-    let mut nid = get_node_id(node_tx.clone()).await;
+    let mut nid = node_manager::get_node_id(node_tx.clone()).await;
 
     eprintln!("node id received {}", nid.clone());
 
@@ -111,7 +113,7 @@ async fn process_msg(
         Payload::Init { node_id, node_ids } => {
             nid = node_id.clone();
             node_tx
-                .send(NodeCommands::InitNode {
+                .send(node_manager::Commands::InitNode {
                     id: nid.clone(),
                     peer_ids: node_ids,
                 })
@@ -138,7 +140,7 @@ async fn process_msg(
 
             eprintln!("awaiting init global counter msg with id {}", write_id);
 
-            let write_resp = take(response_tx.clone(), write_id).await;
+            let write_resp = response_collector::take(response_tx.clone(), write_id).await;
             match write_resp.body.payload {
                 Payload::WriteOk => {
                     eprintln!("global counter initialized!");
@@ -216,9 +218,9 @@ fn new_msg_id(cnt: Arc<std::sync::Mutex<usize>>) -> usize {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let response_collector = ResponseCollector::new();
+    let response_collector = response_collector::ResponseCollector::new();
     let msg_cnt = Arc::new(std::sync::Mutex::new(1));
-    let node_manager = NodeManager::new();
+    let node_manager = node_manager::NodeManager::new();
     let counter = counter::Counter::new(msg_cnt.clone(), response_collector.sender());
 
     loop {
@@ -266,140 +268,3 @@ fn send_global_counter_read(msg_id: usize, src: String) {
     eprintln!("sending msg to seq-kv {:?}", read_kv_msg);
     send_msg(read_kv_msg);
 }
-
-async fn take(tx: tokio::sync::mpsc::Sender<RespColCommand>, msg_id: usize) -> Message {
-    loop {
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-
-        tx.send(RespColCommand::GetAndRemove {
-            msg_id,
-            resp: resp_tx,
-        })
-        .await
-        .unwrap();
-
-        if let Some(msg) = resp_rx.await.unwrap() {
-            return msg;
-        }
-        tokio::task::yield_now().await;
-    }
-}
-
-#[derive(Debug)]
-pub enum RespColCommand {
-    Put {
-        msg_id: usize,
-        msg: Message,
-    },
-    GetAndRemove {
-        msg_id: usize,
-        resp: tokio::sync::oneshot::Sender<Option<Message>>,
-    },
-}
-
-struct ResponseCollector {
-    tx: tokio::sync::mpsc::Sender<RespColCommand>,
-}
-
-impl ResponseCollector {
-    fn new() -> Self {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(200);
-
-        tokio::spawn(async move {
-            let mut responses = HashMap::new();
-
-            while let Some(cmd) = rx.recv().await {
-                use RespColCommand::*;
-
-                match cmd {
-                    Put { msg_id, msg } => {
-                        responses.insert(msg_id, msg);
-                    }
-                    GetAndRemove { msg_id, resp } => {
-                        if let Some(msg) = responses.remove_entry(&msg_id) {
-                            if let Err(e) = resp.send(Some(msg.1)) {
-                                panic!("sending GetAndRemove {:?}", e)
-                            }
-                        } else {
-                            if let Err(e) = resp.send(None) {
-                                panic!("sending GetAndRemove {:?}", e)
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        Self { tx }
-    }
-
-    fn sender(&self) -> tokio::sync::mpsc::Sender<RespColCommand> {
-        self.tx.clone()
-    }
-}
-
-#[derive(Debug)]
-pub enum NodeCommands {
-    InitNode {
-        id: String,
-        peer_ids: Vec<String>,
-    },
-    GetID {
-        resp: tokio::sync::oneshot::Sender<Option<String>>,
-    },
-}
-
-pub async fn get_node_id(tx: tokio::sync::mpsc::Sender<NodeCommands>) -> String {
-    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-
-    tx.send(NodeCommands::GetID { resp: resp_tx })
-        .await
-        .unwrap();
-
-    if let Some(msg) = resp_rx.await.unwrap() {
-        return msg;
-    } else {
-        return String::new();
-    }
-}
-
-struct NodeManager {
-    tx: Sender<NodeCommands>,
-}
-
-impl NodeManager {
-    fn new() -> Self {
-        let (tx, mut rx) = channel(200);
-
-        tokio::spawn(async move {
-            let mut node_id: Option<String> = None;
-            let mut peers: Option<Vec<String>> = None;
-
-            while let Some(cmd) = rx.recv().await {
-                use NodeCommands::*;
-
-                match cmd {
-                    InitNode { id, peer_ids } => {
-                        node_id = Some(id);
-                        peers = Some(peer_ids);
-                    }
-                    GetID { resp } => {
-                        if let Err(e) = resp.send(node_id.clone()) {
-                            panic!("failed to send {:?}", e)
-                        }
-                    }
-                }
-            }
-        });
-
-        Self { tx }
-    }
-
-    fn sender(&self) -> Sender<NodeCommands> {
-        self.tx.clone()
-    }
-}
-
-// 2 options to make it faster
-// 1) synchronize with kv store only once in x seconds, or
-// 2) use gossip instead to synchronize once in x seconds

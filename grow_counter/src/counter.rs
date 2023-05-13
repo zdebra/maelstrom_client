@@ -26,7 +26,10 @@ impl Counter {
         self.tx.clone()
     }
 
-    pub fn new(msg_cnt: Arc<Mutex<usize>>, response_tx: Sender<RespColCommand>) -> Self {
+    pub fn new(
+        msg_cnt: Arc<Mutex<usize>>,
+        response_tx: Sender<response_collector::Command>,
+    ) -> Self {
         let (tx, mut rx) = channel(200);
 
         let mut interval_timer =
@@ -78,7 +81,7 @@ impl Counter {
 async fn sync(
     node_id: String,
     msg_cnt: Arc<Mutex<usize>>,
-    response_tx: Sender<RespColCommand>,
+    response_tx: Sender<response_collector::Command>,
     global_counter_local_value: &mut usize,
     local_delta: &mut usize,
 ) {
@@ -87,7 +90,7 @@ async fn sync(
         send_global_counter_read(read_id, node_id.clone());
         eprintln!("[counter sync] awaiting read response {}", read_id);
 
-        let read_resp = take(response_tx.clone(), read_id).await;
+        let read_resp = response_collector::take(response_tx.clone(), read_id).await;
         let global_counter = match read_resp.body.payload {
             Payload::ReadOk { value } => value,
             _ => panic!("[counter sync] unexpected response: {:?}", read_resp),
@@ -114,7 +117,7 @@ async fn sync(
             id
         };
 
-        let cas_resp = take(response_tx.clone(), cas_id).await;
+        let cas_resp = response_collector::take(response_tx.clone(), cas_id).await;
         match cas_resp.body.payload {
             Payload::CasOk => {
                 // reset local counters
