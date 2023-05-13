@@ -1,3 +1,5 @@
+mod counter;
+
 use anyhow::Result;
 use core::panic;
 use std::sync::Mutex;
@@ -10,7 +12,7 @@ use tokio::sync::mpsc::*;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
-struct Message {
+pub struct Message {
     src: String,
     dest: String,
     body: MessageBody,
@@ -80,7 +82,7 @@ async fn process_msg(
     response_tx: Sender<RespColCommand>,
     node_tx: Sender<NodeCommands>,
     msg_cnt: Arc<Mutex<usize>>,
-    counter_tx: Sender<CounterCommands>,
+    counter_tx: Sender<counter::Commands>,
 ) {
     // handle response
     if let Some(in_reply_to) = msg.body.in_reply_to {
@@ -157,7 +159,7 @@ async fn process_msg(
         Payload::Add { delta } => {
             eprintln!("handling add delta {}", delta);
             counter_tx
-                .send(CounterCommands::Add { delta })
+                .send(counter::Commands::Add { delta })
                 .await
                 .unwrap();
             Payload::AddOk
@@ -171,7 +173,7 @@ async fn process_msg(
             let (tx, rx) = tokio::sync::oneshot::channel();
 
             counter_tx
-                .send(CounterCommands::Read { resp: tx })
+                .send(counter::Commands::Read { resp: tx })
                 .await
                 .unwrap();
 
@@ -209,7 +211,7 @@ async fn main() -> Result<()> {
     let response_collector = ResponseCollector::new();
     let msg_cnt = Arc::new(std::sync::Mutex::new(1));
     let node_manager = NodeManager::new();
-    let counter = Counter::new(
+    let counter = counter::Counter::new(
         node_manager.sender(),
         msg_cnt.clone(),
         response_collector.sender(),
@@ -280,7 +282,7 @@ async fn take(tx: tokio::sync::mpsc::Sender<RespColCommand>, msg_id: usize) -> M
 }
 
 #[derive(Debug)]
-enum RespColCommand {
+pub enum RespColCommand {
     Put {
         msg_id: usize,
         msg: Message,
@@ -333,7 +335,7 @@ impl ResponseCollector {
 }
 
 #[derive(Debug)]
-enum NodeCommands {
+pub enum NodeCommands {
     InitNode {
         id: String,
         peer_ids: Vec<String>,
@@ -343,7 +345,7 @@ enum NodeCommands {
     },
 }
 
-async fn get_node_id(tx: tokio::sync::mpsc::Sender<NodeCommands>) -> String {
+pub async fn get_node_id(tx: tokio::sync::mpsc::Sender<NodeCommands>) -> String {
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
 
     tx.send(NodeCommands::GetID { resp: resp_tx })
@@ -397,126 +399,3 @@ impl NodeManager {
 // 2 options to make it faster
 // 1) synchronize with kv store only once in x seconds, or
 // 2) use gossip instead to synchronize once in x seconds
-
-#[derive(Debug)]
-enum CounterCommands {
-    Read {
-        resp: tokio::sync::oneshot::Sender<usize>,
-    },
-    Add {
-        delta: usize,
-    },
-}
-
-struct Counter {
-    tx: Sender<CounterCommands>,
-}
-
-impl Counter {
-    fn sender(&self) -> Sender<CounterCommands> {
-        self.tx.clone()
-    }
-
-    fn new(
-        node_tx: Sender<NodeCommands>,
-        msg_cnt: Arc<Mutex<usize>>,
-        response_tx: Sender<RespColCommand>,
-    ) -> Self {
-        let (tx, mut rx) = channel(200);
-
-        let mut interval_timer =
-            tokio::time::interval(chrono::Duration::seconds(2).to_std().unwrap());
-
-        tokio::spawn(async move {
-            // local copy of a global counter based on the latest synchronization
-            let mut global_counter_local_value = 0;
-
-            // sum of all locally received additions
-            let mut local_delta = 0;
-
-            loop {
-                tokio::select! {
-                    _ = interval_timer.tick() => {
-                        eprintln!("[counter sync] counter synchronization...");
-                        sync(node_tx.clone(), msg_cnt.clone(), response_tx.clone(), &mut global_counter_local_value, &mut local_delta).await;
-                    }
-                    Some(cmd) = rx.recv() => {
-                        eprintln!("received counter command");
-                        use CounterCommands::*;
-
-                        match cmd {
-                            Read { resp } => {
-                                resp.send(global_counter_local_value + local_delta).unwrap();
-                            }
-                            Add { delta } => {
-                                local_delta += delta;
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        Self { tx }
-    }
-}
-
-async fn sync(
-    node_tx: Sender<NodeCommands>,
-    msg_cnt: Arc<Mutex<usize>>,
-    response_tx: Sender<RespColCommand>,
-    global_counter_local_value: &mut usize,
-    local_delta: &mut usize,
-) {
-    let nid = get_node_id(node_tx.clone()).await;
-
-    loop {
-        let read_id = new_msg_id(msg_cnt.clone());
-        send_global_counter_read(read_id, nid.clone());
-        eprintln!("[counter sync] awaiting read response {}", read_id);
-
-        let read_resp = take(response_tx.clone(), read_id).await;
-        let global_counter = match read_resp.body.payload {
-            Payload::ReadOk { value } => value,
-            _ => panic!("[counter sync] unexpected response: {:?}", read_resp),
-        };
-
-        eprintln!("[counter sync] received global counter {}", global_counter);
-
-        let new_global_counter = global_counter + *local_delta;
-        let cas_id = {
-            let id = new_msg_id(msg_cnt.clone());
-            send_msg(Message {
-                src: nid.clone(),
-                dest: SEQ_KV_SVC.to_string(),
-                body: MessageBody {
-                    msg_id: Some(id),
-                    in_reply_to: None,
-                    payload: Payload::Cas {
-                        key: GLOBAL_COUNTER_KEY.to_string(),
-                        from: global_counter,
-                        to: new_global_counter,
-                    },
-                },
-            });
-            id
-        };
-
-        let cas_resp = take(response_tx.clone(), cas_id).await;
-        match cas_resp.body.payload {
-            Payload::CasOk => {
-                // reset local counters
-                *global_counter_local_value = new_global_counter;
-                *local_delta = 0;
-                return; // jump out of the loop
-            }
-            Payload::Error { code, text } => {
-                // 22 => case `from` value mismatch; continue with the loop
-                if code != 22 {
-                    panic!("unexpected error code {}: {}", code, text)
-                }
-            }
-            _ => panic!("unexpected response: {:?}", cas_resp),
-        }
-    }
-}
