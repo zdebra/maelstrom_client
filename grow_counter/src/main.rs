@@ -80,6 +80,7 @@ async fn process_msg(
     response_tx: Sender<RespColCommand>,
     node_tx: Sender<NodeCommands>,
     msg_cnt: Arc<Mutex<usize>>,
+    counter_tx: Sender<CounterCommands>,
 ) {
     // handle response
     if let Some(in_reply_to) = msg.body.in_reply_to {
@@ -155,43 +156,11 @@ async fn process_msg(
         }
         Payload::Add { delta } => {
             eprintln!("handling add delta {}", delta);
-
-            let read_id = new_msg_id(msg_cnt.clone());
-            send_global_counter_read(read_id, nid.clone());
-
-            eprintln!("awaiting response for msg id {}", read_id);
-
-            let read_resp = take(response_tx.clone(), read_id).await;
-            let global_counter = match read_resp.body.payload {
-                Payload::ReadOk { value } => value,
-                _ => panic!("unexpected response: {:?}", read_resp),
-            };
-
-            eprintln!("received global counter value {}", global_counter);
-
-            let cas_id = {
-                let id = new_msg_id(msg_cnt.clone());
-                send_msg(Message {
-                    src: nid.clone(),
-                    dest: SEQ_KV_SVC.to_string(),
-                    body: MessageBody {
-                        msg_id: Some(id),
-                        in_reply_to: None,
-                        payload: Payload::Cas {
-                            key: GLOBAL_COUNTER_KEY.to_string(),
-                            from: global_counter,
-                            to: global_counter + delta,
-                        },
-                    },
-                });
-                id
-            };
-
-            let cas_resp = take(response_tx.clone(), cas_id).await;
-            match cas_resp.body.payload {
-                Payload::CasOk => Payload::AddOk,
-                _ => panic!("unexpected response: {:?}", cas_resp),
-            }
+            counter_tx
+                .send(CounterCommands::Add { delta })
+                .await
+                .unwrap();
+            Payload::AddOk
         }
         Payload::AddOk => {
             panic!("unexpected branch of code")
@@ -199,19 +168,17 @@ async fn process_msg(
         Payload::Read { .. } => {
             eprintln!("handling read...");
 
-            let read_id = new_msg_id(msg_cnt.clone());
-            send_global_counter_read(read_id, nid.clone());
+            let (tx, rx) = tokio::sync::oneshot::channel();
 
-            eprintln!("awaiting read response {}", read_id);
-            let read_resp = take(response_tx.clone(), read_id).await;
-            let global_counter = match read_resp.body.payload {
-                Payload::ReadOk { value } => value,
-                _ => panic!("unexpected response: {:?}", read_resp),
-            };
-            eprintln!("received global counter value {}", global_counter);
-            Payload::ReadOk {
-                value: global_counter,
-            }
+            counter_tx
+                .send(CounterCommands::Read { resp: tx })
+                .await
+                .unwrap();
+
+            eprintln!("waiting for resp...");
+            let value = rx.await.unwrap();
+            eprintln!("read ok!");
+            Payload::ReadOk { value }
         }
         Payload::ReadOk { .. } => panic!("unexpected branch of code"),
         Payload::Cas { .. } => panic!("unexpected branch of code"),
@@ -242,17 +209,23 @@ async fn main() -> Result<()> {
     let response_collector = ResponseCollector::new();
     let msg_cnt = Arc::new(std::sync::Mutex::new(1));
     let node_manager = NodeManager::new();
+    let counter = Counter::new(
+        node_manager.sender(),
+        msg_cnt.clone(),
+        response_collector.sender(),
+    );
 
     loop {
         let resp_tx = response_collector.sender();
         let node_tx = node_manager.sender();
         let msg_cnt_arc = msg_cnt.clone();
+        let counter_tx = counter.sender();
         // blocking receive
         let msg = receive_msg();
         eprintln!("received msg: {:?}", msg);
         tokio::spawn(async move {
             eprintln!("task was spawned");
-            process_msg(msg, resp_tx, node_tx, msg_cnt_arc).await;
+            process_msg(msg, resp_tx, node_tx, msg_cnt_arc, counter_tx).await;
         });
     }
 }
@@ -416,7 +389,7 @@ impl NodeManager {
         Self { tx }
     }
 
-    fn sender(&self) -> tokio::sync::mpsc::Sender<NodeCommands> {
+    fn sender(&self) -> Sender<NodeCommands> {
         self.tx.clone()
     }
 }
@@ -425,9 +398,14 @@ impl NodeManager {
 // 1) synchronize with kv store only once in x seconds, or
 // 2) use gossip instead to synchronize once in x seconds
 
+#[derive(Debug)]
 enum CounterCommands {
-    Read { resp: Sender<usize> },
-    Add { delta: usize },
+    Read {
+        resp: tokio::sync::oneshot::Sender<usize>,
+    },
+    Add {
+        delta: usize,
+    },
 }
 
 struct Counter {
@@ -435,6 +413,10 @@ struct Counter {
 }
 
 impl Counter {
+    fn sender(&self) -> Sender<CounterCommands> {
+        self.tx.clone()
+    }
+
     fn new(
         node_tx: Sender<NodeCommands>,
         msg_cnt: Arc<Mutex<usize>>,
@@ -464,9 +446,7 @@ impl Counter {
 
                         match cmd {
                             Read { resp } => {
-                                if let Err(e) = resp.send(global_counter_local_value + local_delta).await {
-                                    panic!("Counter failed to respond to Read cmd");
-                                }
+                                resp.send(global_counter_local_value + local_delta).unwrap();
                             }
                             Add { delta } => {
                                 local_delta += delta;
