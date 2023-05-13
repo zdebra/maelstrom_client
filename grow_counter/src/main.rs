@@ -1,11 +1,10 @@
 use anyhow::Result;
 use core::panic;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 
 use std::{
     collections::HashMap,
     io::{self, BufRead, Write},
-    ops::Add,
     sync::Arc,
 };
 
@@ -73,11 +72,6 @@ enum Payload {
     WriteOk,
 }
 
-struct Node {
-    id: String,
-    peer_ids: Vec<String>,
-}
-
 const GLOBAL_COUNTER_KEY: &str = "my-counter";
 const SEQ_KV_SVC: &str = "seq-kv";
 
@@ -85,7 +79,7 @@ async fn process_msg(
     msg: Message,
     response_tx: tokio::sync::mpsc::Sender<RespColCommand>,
     node_tx: tokio::sync::mpsc::Sender<NodeCommands>,
-    msg_cnt: Arc<std::sync::Mutex<usize>>,
+    msg_cnt: Arc<Mutex<usize>>,
 ) {
     // handle response
     if let Some(in_reply_to) = msg.body.in_reply_to {
@@ -95,7 +89,8 @@ async fn process_msg(
                 msg_id: in_reply_to,
                 msg,
             })
-            .await;
+            .await
+            .unwrap();
         return;
     }
 
@@ -130,7 +125,7 @@ async fn process_msg(
                         msg_id: Some(id),
                         in_reply_to: None,
                         payload: Payload::Write {
-                            key: SEQ_KV_SVC.to_string(),
+                            key: GLOBAL_COUNTER_KEY.to_string(),
                             value: 0,
                         },
                     },
@@ -150,12 +145,7 @@ async fn process_msg(
             Payload::InitOk
         }
         Payload::InitOk {} => panic!("unexpected message type InitOk received"),
-        Payload::Topology { topology } => {
-            // if let Some(neighbours) = topology.get(&node_id) {
-            //     node.peer_ids = neighbours.clone();
-            // }
-            Payload::TopologyOk
-        }
+        Payload::Topology { .. } => Payload::TopologyOk,
         Payload::TopologyOk => {
             return;
         }
@@ -240,15 +230,6 @@ async fn process_msg(
     });
 }
 
-impl Node {
-    fn new() -> Self {
-        Self {
-            id: "uninitialized-node-id".to_string(),
-            peer_ids: Vec::new(),
-        }
-    }
-}
-
 fn get_counter_and_increase(cnt: Arc<std::sync::Mutex<usize>>) -> usize {
     let mut msg_cnt = cnt.lock().unwrap();
     let tmp = *msg_cnt;
@@ -275,7 +256,6 @@ async fn main() -> Result<()> {
         });
     }
 }
-// what you should do then is make step spawn a task everytime it's done reading a message, and make that task handle that message.
 
 fn receive_msg() -> Message {
     let mut stdin = io::stdin().lock();
@@ -289,7 +269,7 @@ fn send_msg(msg: Message) {
     let mut stdout = io::stdout().lock();
     let serialized_msg = serde_json::to_string(&msg).expect("serialize Message") + "\n";
     stdout.write_all(serialized_msg.as_bytes()).unwrap();
-    stdout.flush();
+    stdout.flush().unwrap();
 }
 
 fn send_global_counter_read(msg_id: usize, src: String) {
@@ -344,7 +324,7 @@ struct ResponseCollector {
 
 impl ResponseCollector {
     fn new() -> Self {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(200);
 
         tokio::spawn(async move {
             let mut responses = HashMap::new();
@@ -410,7 +390,7 @@ struct NodeManager {
 
 impl NodeManager {
     fn new() -> Self {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(200);
 
         tokio::spawn(async move {
             let mut node_id: Option<String> = None;
@@ -441,9 +421,6 @@ impl NodeManager {
     }
 }
 
-// PLAN:
-// 1. use tokio channels to share commands between these parties:
-//     - response collector
-//     - counter with message ids
-// 2. have one manager task receiving these commands
-// 3. process_msg sends requests through these channels and awaits response
+// 2 options to make it faster
+// 1) synchronize with kv store only once in x seconds, or
+// 2) use gossip instead to synchronize once in x seconds
