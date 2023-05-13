@@ -12,6 +12,9 @@ pub enum Commands {
     Add {
         delta: usize,
     },
+    Init {
+        node_id: String,
+    },
 }
 
 pub struct Counter {
@@ -23,11 +26,7 @@ impl Counter {
         self.tx.clone()
     }
 
-    pub fn new(
-        node_tx: Sender<NodeCommands>,
-        msg_cnt: Arc<Mutex<usize>>,
-        response_tx: Sender<RespColCommand>,
-    ) -> Self {
+    pub fn new(msg_cnt: Arc<Mutex<usize>>, response_tx: Sender<RespColCommand>) -> Self {
         let (tx, mut rx) = channel(200);
 
         let mut interval_timer =
@@ -40,14 +39,20 @@ impl Counter {
             // sum of all locally received additions
             let mut local_delta = 0;
 
+            let mut nid: Option<String> = None;
+
             loop {
                 tokio::select! {
                     _ = interval_timer.tick() => {
-                        eprintln!("[counter sync] counter synchronization...");
-                        sync(node_tx.clone(), msg_cnt.clone(), response_tx.clone(), &mut global_counter_local_value, &mut local_delta).await;
+                        if let Some(node_id) = nid.clone() {
+                            eprintln!("[counter sync] counter synchronization...");
+                            sync(node_id.clone(), msg_cnt.clone(), response_tx.clone(), &mut global_counter_local_value, &mut local_delta).await;
+                        } else {
+                            eprintln!("[counter sync] counter sync skipped")
+                        }
                     }
                     Some(cmd) = rx.recv() => {
-                        eprintln!("received counter command");
+                        eprintln!("[counter sync] received counter command");
                         use Commands::*;
 
                         match cmd {
@@ -56,6 +61,9 @@ impl Counter {
                             }
                             Add { delta } => {
                                 local_delta += delta;
+                            }
+                            Init {node_id} => {
+                                nid = Some(node_id);
                             }
                         }
                     }
@@ -68,17 +76,15 @@ impl Counter {
 }
 
 async fn sync(
-    node_tx: Sender<NodeCommands>,
+    node_id: String,
     msg_cnt: Arc<Mutex<usize>>,
     response_tx: Sender<RespColCommand>,
     global_counter_local_value: &mut usize,
     local_delta: &mut usize,
 ) {
-    let nid = get_node_id(node_tx.clone()).await;
-
     loop {
         let read_id = new_msg_id(msg_cnt.clone());
-        send_global_counter_read(read_id, nid.clone());
+        send_global_counter_read(read_id, node_id.clone());
         eprintln!("[counter sync] awaiting read response {}", read_id);
 
         let read_resp = take(response_tx.clone(), read_id).await;
@@ -93,7 +99,7 @@ async fn sync(
         let cas_id = {
             let id = new_msg_id(msg_cnt.clone());
             send_msg(Message {
-                src: nid.clone(),
+                src: node_id.clone(),
                 dest: SEQ_KV_SVC.to_string(),
                 body: MessageBody {
                     msg_id: Some(id),

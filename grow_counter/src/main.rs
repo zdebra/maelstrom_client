@@ -211,11 +211,7 @@ async fn main() -> Result<()> {
     let response_collector = ResponseCollector::new();
     let msg_cnt = Arc::new(std::sync::Mutex::new(1));
     let node_manager = NodeManager::new();
-    let counter = counter::Counter::new(
-        node_manager.sender(),
-        msg_cnt.clone(),
-        response_collector.sender(),
-    );
+    let counter = counter::Counter::new(msg_cnt.clone(), response_collector.sender());
 
     loop {
         let resp_tx = response_collector.sender();
