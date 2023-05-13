@@ -107,9 +107,6 @@ async fn process_msg(
 
     // handle request
     let payload = match msg.body.payload.clone() {
-        Payload::Write { .. } => panic!("unexpected branch of code"),
-        Payload::WriteOk { .. } => panic!("unexpected branch of code"),
-        Payload::Error { .. } => panic!("unexpected branch of code"),
         Payload::Init { node_id, node_ids } => {
             nid = node_id.clone();
             node_tx
@@ -157,7 +154,6 @@ async fn process_msg(
 
             Payload::InitOk
         }
-        Payload::InitOk {} => panic!("unexpected message type InitOk received"),
         Payload::Topology { .. } => Payload::TopologyOk,
         Payload::TopologyOk => {
             return;
@@ -174,9 +170,6 @@ async fn process_msg(
                 .unwrap();
             Payload::AddOk
         }
-        Payload::AddOk => {
-            panic!("unexpected branch of code")
-        }
         Payload::Read { .. } => {
             eprintln!("handling read...");
 
@@ -192,9 +185,14 @@ async fn process_msg(
             eprintln!("read ok!");
             Payload::ReadOk { value }
         }
+        Payload::InitOk {} => panic!("unexpected message type InitOk received"),
+        Payload::AddOk => panic!("unexpected branch of code"),
         Payload::ReadOk { .. } => panic!("unexpected branch of code"),
         Payload::Cas { .. } => panic!("unexpected branch of code"),
         Payload::CasOk => panic!("unexpected branch of code"),
+        Payload::Write { .. } => panic!("unexpected branch of code"),
+        Payload::WriteOk { .. } => panic!("unexpected branch of code"),
+        Payload::Error { .. } => panic!("unexpected branch of code"),
     };
 
     let resp_id = new_msg_id(msg_cnt.clone());
