@@ -1,12 +1,12 @@
 use anyhow::Result;
 use core::panic;
 use std::sync::Mutex;
-
 use std::{
     collections::HashMap,
     io::{self, BufRead, Write},
     sync::Arc,
 };
+use tokio::sync::mpsc::*;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -77,8 +77,8 @@ const SEQ_KV_SVC: &str = "seq-kv";
 
 async fn process_msg(
     msg: Message,
-    response_tx: tokio::sync::mpsc::Sender<RespColCommand>,
-    node_tx: tokio::sync::mpsc::Sender<NodeCommands>,
+    response_tx: Sender<RespColCommand>,
+    node_tx: Sender<NodeCommands>,
     msg_cnt: Arc<Mutex<usize>>,
 ) {
     // handle response
@@ -117,7 +117,7 @@ async fn process_msg(
 
             eprintln!("init global counter...");
             let write_id = {
-                let id = get_counter_and_increase(msg_cnt.clone());
+                let id = new_msg_id(msg_cnt.clone());
                 send_msg(Message {
                     src: nid.clone(),
                     dest: SEQ_KV_SVC.to_string(),
@@ -156,7 +156,7 @@ async fn process_msg(
         Payload::Add { delta } => {
             eprintln!("handling add delta {}", delta);
 
-            let read_id = get_counter_and_increase(msg_cnt.clone());
+            let read_id = new_msg_id(msg_cnt.clone());
             send_global_counter_read(read_id, nid.clone());
 
             eprintln!("awaiting response for msg id {}", read_id);
@@ -170,7 +170,7 @@ async fn process_msg(
             eprintln!("received global counter value {}", global_counter);
 
             let cas_id = {
-                let id = get_counter_and_increase(msg_cnt.clone());
+                let id = new_msg_id(msg_cnt.clone());
                 send_msg(Message {
                     src: nid.clone(),
                     dest: SEQ_KV_SVC.to_string(),
@@ -199,7 +199,7 @@ async fn process_msg(
         Payload::Read { .. } => {
             eprintln!("handling read...");
 
-            let read_id = get_counter_and_increase(msg_cnt.clone());
+            let read_id = new_msg_id(msg_cnt.clone());
             send_global_counter_read(read_id, nid.clone());
 
             eprintln!("awaiting read response {}", read_id);
@@ -218,7 +218,7 @@ async fn process_msg(
         Payload::CasOk => panic!("unexpected branch of code"),
     };
 
-    let resp_id = get_counter_and_increase(msg_cnt.clone());
+    let resp_id = new_msg_id(msg_cnt.clone());
     send_msg(Message {
         src: msg.dest,
         dest: msg.src,
@@ -230,7 +230,7 @@ async fn process_msg(
     });
 }
 
-fn get_counter_and_increase(cnt: Arc<std::sync::Mutex<usize>>) -> usize {
+fn new_msg_id(cnt: Arc<std::sync::Mutex<usize>>) -> usize {
     let mut msg_cnt = cnt.lock().unwrap();
     let tmp = *msg_cnt;
     *msg_cnt += 1;
@@ -385,12 +385,12 @@ async fn get_node_id(tx: tokio::sync::mpsc::Sender<NodeCommands>) -> String {
 }
 
 struct NodeManager {
-    tx: tokio::sync::mpsc::Sender<NodeCommands>,
+    tx: Sender<NodeCommands>,
 }
 
 impl NodeManager {
     fn new() -> Self {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(200);
+        let (tx, mut rx) = channel(200);
 
         tokio::spawn(async move {
             let mut node_id: Option<String> = None;
@@ -424,3 +424,119 @@ impl NodeManager {
 // 2 options to make it faster
 // 1) synchronize with kv store only once in x seconds, or
 // 2) use gossip instead to synchronize once in x seconds
+
+enum CounterCommands {
+    Read { resp: Sender<usize> },
+    Add { delta: usize },
+}
+
+struct Counter {
+    tx: Sender<CounterCommands>,
+}
+
+impl Counter {
+    fn new(
+        node_tx: Sender<NodeCommands>,
+        msg_cnt: Arc<Mutex<usize>>,
+        response_tx: Sender<RespColCommand>,
+    ) -> Self {
+        let (tx, mut rx) = channel(200);
+
+        let mut interval_timer =
+            tokio::time::interval(chrono::Duration::seconds(2).to_std().unwrap());
+
+        tokio::spawn(async move {
+            // local copy of a global counter based on the latest synchronization
+            let mut global_counter_local_value = 0;
+
+            // sum of all locally received additions
+            let mut local_delta = 0;
+
+            loop {
+                tokio::select! {
+                    _ = interval_timer.tick() => {
+                        eprintln!("[counter sync] counter synchronization...");
+                        sync(node_tx.clone(), msg_cnt.clone(), response_tx.clone(), &mut global_counter_local_value, &mut local_delta).await;
+                    }
+                    Some(cmd) = rx.recv() => {
+                        eprintln!("received counter command");
+                        use CounterCommands::*;
+
+                        match cmd {
+                            Read { resp } => {
+                                if let Err(e) = resp.send(global_counter_local_value + local_delta).await {
+                                    panic!("Counter failed to respond to Read cmd");
+                                }
+                            }
+                            Add { delta } => {
+                                local_delta += delta;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Self { tx }
+    }
+}
+
+async fn sync(
+    node_tx: Sender<NodeCommands>,
+    msg_cnt: Arc<Mutex<usize>>,
+    response_tx: Sender<RespColCommand>,
+    global_counter_local_value: &mut usize,
+    local_delta: &mut usize,
+) {
+    let nid = get_node_id(node_tx.clone()).await;
+
+    loop {
+        let read_id = new_msg_id(msg_cnt.clone());
+        send_global_counter_read(read_id, nid.clone());
+        eprintln!("[counter sync] awaiting read response {}", read_id);
+
+        let read_resp = take(response_tx.clone(), read_id).await;
+        let global_counter = match read_resp.body.payload {
+            Payload::ReadOk { value } => value,
+            _ => panic!("[counter sync] unexpected response: {:?}", read_resp),
+        };
+
+        eprintln!("[counter sync] received global counter {}", global_counter);
+
+        let new_global_counter = global_counter + *local_delta;
+        let cas_id = {
+            let id = new_msg_id(msg_cnt.clone());
+            send_msg(Message {
+                src: nid.clone(),
+                dest: SEQ_KV_SVC.to_string(),
+                body: MessageBody {
+                    msg_id: Some(id),
+                    in_reply_to: None,
+                    payload: Payload::Cas {
+                        key: GLOBAL_COUNTER_KEY.to_string(),
+                        from: global_counter,
+                        to: new_global_counter,
+                    },
+                },
+            });
+            id
+        };
+
+        let cas_resp = take(response_tx.clone(), cas_id).await;
+        match cas_resp.body.payload {
+            Payload::CasOk => {
+                // reset local counters
+                *global_counter_local_value = new_global_counter;
+                *local_delta = 0;
+                return; // jump out of the loop
+            }
+            Payload::Error { code, text } => {
+                // 22 => case `from` value mismatch; continue with the loop
+                if code != 22 {
+                    panic!("unexpected error code {}: {}", code, text)
+                }
+            }
+            _ => panic!("unexpected response: {:?}", cas_resp),
+        }
+    }
+}
