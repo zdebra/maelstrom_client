@@ -145,6 +145,14 @@ async fn process_msg(
                 }
                 _ => panic!("couldn't init global counter"),
             }
+
+            counter_tx
+                .send(counter::Commands::Init {
+                    node_id: nid.clone(),
+                })
+                .await
+                .unwrap();
+
             Payload::InitOk
         }
         Payload::InitOk {} => panic!("unexpected message type InitOk received"),
