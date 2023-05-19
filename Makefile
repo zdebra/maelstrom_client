@@ -1,6 +1,7 @@
 MAELSTROM_BINARY = ../maelstrom/maelstrom
 BROADCAST_BINARY = target/debug/broadcast
 GROW_COUNTER_BINARY = target/debug/grow_counter
+KAFKA_BINARY = target/debug/kafka
 
 
 echo: build
@@ -21,6 +22,10 @@ echo2: build
 
 counter: build
 	$(MAELSTROM_BINARY) test -w g-counter --bin $(GROW_COUNTER_BINARY) --node-count 3 --rate 100 --time-limit 20 --nemesis partition --log-stderr
+
+echo_kafka: build
+	$(MAELSTROM_BINARY) test -w echo --bin $(KAFKA_BINARY) --node-count 1 --time-limit 10 --log-stderr
+
 
 build:
 	cargo build

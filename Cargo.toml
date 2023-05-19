@@ -5,7 +5,8 @@ edition = "2021"
 
 members = [
     "broadcast",
-    "grow_counter"
+    "grow_counter",
+    "kafka"
 ]
 
 [[bin]]
@@ -19,6 +20,12 @@ name= "grow_counter"
 test = false
 bench = false
 path="grow_counter/src/main.rs"
+
+[[bin]]
+name= "kafka"
+test = false
+bench = false
+path="kafka/src/main.rs"
 
 [dependencies]
 anyhow = "1.0.70"
