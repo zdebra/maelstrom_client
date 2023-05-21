@@ -4,6 +4,8 @@ use std::{
     sync::mpsc,
 };
 
+use crate::message::Payload;
+
 mod message;
 
 fn main() {
@@ -31,7 +33,10 @@ fn process_msg(req: message::Message, node_tx: mpsc::Sender<NodeCommand>) {
             send_reply(req, node_tx.clone(), message::Payload::SendOk { offset });
         }
         // SendOk { offset } => todo!(),
-        Poll { offsets } => {}
+        Poll { offsets } => {
+            let msgs = poll_logs(node_tx.clone(), offsets);
+            send_reply(req, node_tx.clone(), message::Payload::PollOk { msgs });
+        }
         // PollOk { msgs } => todo!(),
         CommitOffsets { offsets } => todo!(),
         // CommitOffsetsOk => todo!(),
@@ -101,6 +106,20 @@ fn append_msg(node_tx: mpsc::Sender<NodeCommand>, key: String, msg: usize) -> us
         })
         .expect("send log append");
     rx.recv().expect("offset receive")
+}
+
+fn poll_logs(
+    node_tx: mpsc::Sender<NodeCommand>,
+    keys_offsets: HashMap<String, usize>,
+) -> HashMap<String, Vec<Vec<usize>>> {
+    let (tx, rx) = mpsc::channel();
+    node_tx
+        .send(NodeCommand::Poll {
+            keys_offsets,
+            sender_msgs: tx,
+        })
+        .expect("send poll");
+    rx.recv().expect("poll receive")
 }
 
 enum NodeCommand {
