@@ -16,19 +16,22 @@ fn main() {
     }
 }
 
-fn process_msg(msg: message::Message, node_tx: mpsc::Sender<NodeCommand>) {
+fn process_msg(req: message::Message, node_tx: mpsc::Sender<NodeCommand>) {
     use message::Payload::*;
-    match msg.body.payload.clone() {
+    match req.body.payload.clone() {
         Init { node_id, node_ids } => {
             eprintln!("initializing node..");
             node_init(node_tx.clone(), node_id);
-            send_reply(msg, node_tx.clone(), message::Payload::InitOk);
+            send_reply(req, node_tx.clone(), message::Payload::InitOk);
         }
         Topology { topology } => todo!(),
         // Error { code, text } => todo!(),
-        Send { key, msg } => todo!(),
+        Send { key, msg } => {
+            let offset = append_msg(node_tx.clone(), key, msg);
+            send_reply(req, node_tx.clone(), message::Payload::SendOk { offset });
+        }
         // SendOk { offset } => todo!(),
-        Poll { offsets } => todo!(),
+        Poll { offsets } => {}
         // PollOk { msgs } => todo!(),
         CommitOffsets { offsets } => todo!(),
         // CommitOffsetsOk => todo!(),
@@ -36,7 +39,7 @@ fn process_msg(msg: message::Message, node_tx: mpsc::Sender<NodeCommand>) {
         // ListCommitedOffsetsOk { offsets } => todo!(),
         Echo { echo } => {
             eprintln!("hadnling echo..");
-            send_reply(msg, node_tx.clone(), message::Payload::EchoOk { echo });
+            send_reply(req, node_tx.clone(), message::Payload::EchoOk { echo });
         }
         _ => panic!("unexpected branch of code"),
     }
@@ -88,16 +91,59 @@ fn node_init(node_tx: mpsc::Sender<NodeCommand>, node_id: String) {
         .expect("send node init cmd");
 }
 
+fn append_msg(node_tx: mpsc::Sender<NodeCommand>, key: String, msg: usize) -> usize {
+    let (tx, rx) = mpsc::channel();
+    node_tx
+        .send(NodeCommand::LogAppend {
+            key,
+            msg,
+            sender_offset: tx,
+        })
+        .expect("send log append");
+    rx.recv().expect("offset receive")
+}
+
 enum NodeCommand {
-    Init { id: String },
-    GetNodeId { sender: mpsc::Sender<String> },
-    NextMsgId { sender: mpsc::Sender<usize> },
+    Init {
+        id: String,
+    },
+    GetNodeId {
+        sender: mpsc::Sender<String>,
+    },
+    NextMsgId {
+        sender: mpsc::Sender<usize>,
+    },
+    LogAppend {
+        key: String,
+        msg: usize,
+        sender_offset: mpsc::Sender<usize>,
+    },
+    Poll {
+        keys_offsets: HashMap<String, usize>,
+        sender_msgs: mpsc::Sender<HashMap<String, Vec<Vec<usize>>>>,
+    },
 }
 
 struct Node {
     id: String,
     logs: HashMap<String, Vec<usize>>,
     msg_id_cnt: usize,
+}
+
+impl Node {
+    fn pull_logs(&self, keys_offsets: HashMap<String, usize>) -> HashMap<String, Vec<Vec<usize>>> {
+        let mut out = HashMap::new();
+        for (req_key, start_offset) in keys_offsets.into_iter() {
+            if let Some(logs) = self.logs.get(&req_key) {
+                let mut key_vec: Vec<Vec<usize>> = Vec::new();
+                for (i, &msg) in logs[start_offset..].into_iter().enumerate() {
+                    key_vec.push(vec![i + start_offset, msg]);
+                }
+                out.insert(req_key, key_vec);
+            }
+        }
+        out
+    }
 }
 
 fn start_node_manager() -> mpsc::Sender<NodeCommand> {
@@ -120,8 +166,64 @@ fn start_node_manager() -> mpsc::Sender<NodeCommand> {
                     sender.send(node.msg_id_cnt.clone()).unwrap();
                     node.msg_id_cnt += 1;
                 }
+                LogAppend {
+                    key,
+                    msg,
+                    sender_offset,
+                } => {
+                    if let Some(log) = node.logs.get_mut(&key) {
+                        log.push(msg);
+                    } else {
+                        node.logs.insert(key.clone(), vec![msg]);
+                    }
+                    sender_offset
+                        .send(node.logs.get(&key).unwrap().len() - 1)
+                        .expect("send offset via channel")
+                }
+                Poll {
+                    keys_offsets,
+                    sender_msgs,
+                } => sender_msgs
+                    .send(node.pull_logs(keys_offsets))
+                    .expect("send offset messages"),
             }
         }
     });
     tx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn node_pull_logs() {
+        let node = Node {
+            id: "id".to_string(),
+            logs: HashMap::from([
+                ("k1".to_string(), vec![1, 2, 3, 4]),
+                ("k2".to_string(), vec![10, 20, 30, 40]),
+                ("k3".to_string(), vec![100, 200, 300, 400]),
+            ]),
+            msg_id_cnt: 0,
+        };
+
+        assert_eq!(
+            HashMap::from([
+                ("k1".to_string(), vec![vec![2, 3], vec![3, 4]]),
+                (
+                    "k2".to_string(),
+                    vec![vec![1, 20], vec![2, 30], vec![3, 40]]
+                ),
+                (
+                    "k3".to_string(),
+                    vec![vec![0, 100], vec![1, 200], vec![2, 300], vec![3, 400]]
+                ),
+            ]),
+            node.pull_logs(HashMap::from([
+                ("k1".to_string(), 2),
+                ("k2".to_string(), 1),
+                ("k3".to_string(), 0),
+            ]))
+        );
+    }
 }
