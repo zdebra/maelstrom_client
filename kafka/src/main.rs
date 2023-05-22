@@ -38,9 +38,19 @@ fn process_msg(req: message::Message, node_tx: mpsc::Sender<NodeCommand>) {
             send_reply(req, node_tx.clone(), message::Payload::PollOk { msgs });
         }
         // PollOk { msgs } => todo!(),
-        CommitOffsets { offsets } => todo!(),
+        CommitOffsets { offsets } => {
+            commit_offsets(node_tx.clone(), req.src.clone(), offsets);
+            send_reply(req, node_tx.clone(), message::Payload::CommitOffsetsOk);
+        }
         // CommitOffsetsOk => todo!(),
-        ListCommitedOffsets { keys } => todo!(),
+        ListCommitedOffsets { keys } => {
+            let offsets = list_commited_offsets(node_tx.clone(), req.src.clone(), keys);
+            send_reply(
+                req,
+                node_tx.clone(),
+                message::Payload::ListCommitedOffsetsOk { offsets },
+            );
+        }
         // ListCommitedOffsetsOk { offsets } => todo!(),
         Echo { echo } => {
             eprintln!("hadnling echo..");
@@ -122,6 +132,35 @@ fn poll_logs(
     rx.recv().expect("poll receive")
 }
 
+fn commit_offsets(
+    node_tx: mpsc::Sender<NodeCommand>,
+    src: String,
+    offsets: HashMap<String, usize>,
+) {
+    node_tx
+        .send(NodeCommand::CommitOffsets {
+            client_id: src,
+            offsets,
+        })
+        .expect("send commit offsets")
+}
+
+fn list_commited_offsets(
+    node_tx: mpsc::Sender<NodeCommand>,
+    src: String,
+    keys: Vec<String>,
+) -> HashMap<String, usize> {
+    let (tx, rx) = mpsc::channel();
+    node_tx
+        .send(NodeCommand::ListCommitedOffsets {
+            client_id: src,
+            keys,
+            sender_offsets: tx,
+        })
+        .expect("send commit offsets");
+    rx.recv().expect("recv commited offsets from channel")
+}
+
 enum NodeCommand {
     Init {
         id: String,
@@ -141,12 +180,22 @@ enum NodeCommand {
         keys_offsets: HashMap<String, usize>,
         sender_msgs: mpsc::Sender<HashMap<String, Vec<Vec<usize>>>>,
     },
+    CommitOffsets {
+        client_id: String,
+        offsets: HashMap<String, usize>,
+    },
+    ListCommitedOffsets {
+        client_id: String,
+        keys: Vec<String>,
+        sender_offsets: mpsc::Sender<HashMap<String, usize>>,
+    },
 }
 
 struct Node {
     id: String,
     logs: HashMap<String, Vec<usize>>,
     msg_id_cnt: usize,
+    client_offsets: HashMap<String, HashMap<String, usize>>,
 }
 
 impl Node {
@@ -163,6 +212,16 @@ impl Node {
         }
         out
     }
+
+    fn client_offsets(&self, client_id: String, req_keys: Vec<String>) -> HashMap<String, usize> {
+        self.client_offsets
+            .get(&client_id)
+            .expect("client offsets for given key")
+            .into_iter()
+            .filter(|(k, _)| req_keys.contains(k))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
 }
 
 fn start_node_manager() -> mpsc::Sender<NodeCommand> {
@@ -171,6 +230,7 @@ fn start_node_manager() -> mpsc::Sender<NodeCommand> {
         id: String::new(),
         logs: HashMap::new(),
         msg_id_cnt: 0,
+        client_offsets: HashMap::new(),
     };
 
     std::thread::spawn(move || {
@@ -205,6 +265,19 @@ fn start_node_manager() -> mpsc::Sender<NodeCommand> {
                 } => sender_msgs
                     .send(node.pull_logs(keys_offsets))
                     .expect("send offset messages"),
+                CommitOffsets { client_id, offsets } => {
+                    node.client_offsets.insert(client_id, offsets);
+                }
+                ListCommitedOffsets {
+                    client_id,
+                    keys,
+                    sender_offsets,
+                } => {
+                    let client_offsets = node.client_offsets(client_id, keys);
+                    sender_offsets
+                        .send(client_offsets)
+                        .expect("client offsets sent");
+                }
             }
         }
     });
@@ -224,6 +297,7 @@ mod tests {
                 ("k3".to_string(), vec![100, 200, 300, 400]),
             ]),
             msg_id_cnt: 0,
+            client_offsets: HashMap::new(),
         };
 
         assert_eq!(
@@ -243,6 +317,42 @@ mod tests {
                 ("k2".to_string(), 1),
                 ("k3".to_string(), 0),
             ]))
+        );
+    }
+
+    #[test]
+    fn node_client_offsets() {
+        let node = Node {
+            id: "id".to_string(),
+            logs: HashMap::new(),
+            msg_id_cnt: 0,
+            client_offsets: HashMap::from([
+                (
+                    "c1".to_string(),
+                    HashMap::from([
+                        ("k1".to_string(), 5),
+                        ("k2".to_string(), 10),
+                        ("k3".to_string(), 15),
+                    ]),
+                ),
+                (
+                    "c2".to_string(),
+                    HashMap::from([
+                        ("k1".to_string(), 50),
+                        ("k2".to_string(), 100),
+                        ("k3".to_string(), 150),
+                    ]),
+                ),
+            ]),
+        };
+
+        assert_eq!(
+            HashMap::from([("k2".to_string(), 10), ("k3".to_string(), 15)]),
+            node.client_offsets("c1".to_string(), vec!["k2".to_string(), "k3".to_string()])
+        );
+        assert_eq!(
+            HashMap::from([("k1".to_string(), 50), ("k3".to_string(), 150)]),
+            node.client_offsets("c2".to_string(), vec!["k1".to_string(), "k3".to_string()])
         );
     }
 }
