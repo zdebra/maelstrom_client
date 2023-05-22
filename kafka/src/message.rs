@@ -51,10 +51,10 @@ pub enum Payload {
         offsets: HashMap<String, usize>,
     },
     CommitOffsetsOk,
-    ListCommitedOffsets {
+    ListCommittedOffsets {
         keys: Vec<String>,
     },
-    ListCommitedOffsetsOk {
+    ListCommittedOffsetsOk {
         offsets: HashMap<String, usize>,
     },
     Echo {

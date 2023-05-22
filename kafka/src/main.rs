@@ -4,8 +4,6 @@ use std::{
     sync::mpsc,
 };
 
-use crate::message::Payload;
-
 mod message;
 
 fn main() {
@@ -43,12 +41,12 @@ fn process_msg(req: message::Message, node_tx: mpsc::Sender<NodeCommand>) {
             send_reply(req, node_tx.clone(), message::Payload::CommitOffsetsOk);
         }
         // CommitOffsetsOk => todo!(),
-        ListCommitedOffsets { keys } => {
-            let offsets = list_commited_offsets(node_tx.clone(), req.src.clone(), keys);
+        ListCommittedOffsets { keys } => {
+            let offsets = list_committed_offsets(node_tx.clone(), req.src.clone(), keys);
             send_reply(
                 req,
                 node_tx.clone(),
-                message::Payload::ListCommitedOffsetsOk { offsets },
+                message::Payload::ListCommittedOffsetsOk { offsets },
             );
         }
         // ListCommitedOffsetsOk { offsets } => todo!(),
@@ -145,14 +143,14 @@ fn commit_offsets(
         .expect("send commit offsets")
 }
 
-fn list_commited_offsets(
+fn list_committed_offsets(
     node_tx: mpsc::Sender<NodeCommand>,
     src: String,
     keys: Vec<String>,
 ) -> HashMap<String, usize> {
     let (tx, rx) = mpsc::channel();
     node_tx
-        .send(NodeCommand::ListCommitedOffsets {
+        .send(NodeCommand::ListCommittedOffsets {
             client_id: src,
             keys,
             sender_offsets: tx,
@@ -184,7 +182,7 @@ enum NodeCommand {
         client_id: String,
         offsets: HashMap<String, usize>,
     },
-    ListCommitedOffsets {
+    ListCommittedOffsets {
         client_id: String,
         keys: Vec<String>,
         sender_offsets: mpsc::Sender<HashMap<String, usize>>,
@@ -268,7 +266,7 @@ fn start_node_manager() -> mpsc::Sender<NodeCommand> {
                 CommitOffsets { client_id, offsets } => {
                     node.client_offsets.insert(client_id, offsets);
                 }
-                ListCommitedOffsets {
+                ListCommittedOffsets {
                     client_id,
                     keys,
                     sender_offsets,
