@@ -30,17 +30,14 @@ fn process_msg(req: message::Message, node_tx: mpsc::Sender<NodeCommand>) {
             let offset = append_msg(node_tx.clone(), key, msg);
             send_reply(req, node_tx.clone(), message::Payload::SendOk { offset });
         }
-        // SendOk { offset } => todo!(),
         Poll { offsets } => {
             let msgs = poll_logs(node_tx.clone(), offsets);
             send_reply(req, node_tx.clone(), message::Payload::PollOk { msgs });
         }
-        // PollOk { msgs } => todo!(),
         CommitOffsets { offsets } => {
             commit_offsets(node_tx.clone(), req.src.clone(), offsets);
             send_reply(req, node_tx.clone(), message::Payload::CommitOffsetsOk);
         }
-        // CommitOffsetsOk => todo!(),
         ListCommittedOffsets { keys } => {
             let offsets = list_committed_offsets(node_tx.clone(), req.src.clone(), keys);
             send_reply(
@@ -49,7 +46,6 @@ fn process_msg(req: message::Message, node_tx: mpsc::Sender<NodeCommand>) {
                 message::Payload::ListCommittedOffsetsOk { offsets },
             );
         }
-        // ListCommitedOffsetsOk { offsets } => todo!(),
         Echo { echo } => {
             eprintln!("hadnling echo..");
             send_reply(req, node_tx.clone(), message::Payload::EchoOk { echo });
@@ -212,6 +208,9 @@ impl Node {
     }
 
     fn client_offsets(&self, client_id: String, req_keys: Vec<String>) -> HashMap<String, usize> {
+        if !self.client_offsets.contains_key(&client_id) {
+            return HashMap::new();
+        }
         self.client_offsets
             .get(&client_id)
             .expect("client offsets for given key")
