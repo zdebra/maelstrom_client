@@ -26,10 +26,6 @@ pub enum Payload {
         node_ids: Vec<String>,
     },
     InitOk,
-    Topology {
-        topology: HashMap<String, Vec<String>>,
-    },
-    TopologyOk,
     Error {
         code: usize,
         text: String,
@@ -63,4 +59,24 @@ pub enum Payload {
     EchoOk {
         echo: String,
     },
+    // KV-read
+    Read {
+        key: String,
+    },
+    ReadOk {
+        value: usize,
+    },
+    // KV-write
+    Write {
+        key: String,
+        value: usize,
+    },
+    WriteOk,
+    // KV-Cas
+    Cas {
+        key: String,
+        from: usize,
+        to: usize,
+    },
+    CasOk,
 }

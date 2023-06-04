@@ -1,18 +1,31 @@
 use std::{
     collections::HashMap,
     io::{self, BufRead, Write},
-    sync::mpsc,
+    sync::{mpsc, Arc, Mutex},
 };
 
 mod message;
 
 fn main() {
-    let node_tx = start_node_manager();
+    let resp_router = Arc::new(Mutex::new(ResponseRouter::new()));
+    let node_tx = start_node_manager(Arc::clone(&resp_router));
 
     eprintln!("starting the loop...");
     loop {
         let msg = receive_msg();
-        process_msg(msg, node_tx.clone());
+        let node_tx = node_tx.clone();
+        if let Some(in_reply_to) = msg.body.in_reply_to {
+            resp_router
+                .clone()
+                .lock()
+                .unwrap()
+                .route(in_reply_to, msg)
+                .unwrap();
+        } else {
+            std::thread::spawn(move || {
+                process_msg(msg, node_tx);
+            });
+        }
     }
 }
 
@@ -24,7 +37,6 @@ fn process_msg(req: message::Message, node_tx: mpsc::Sender<NodeCommand>) {
             node_init(node_tx.clone(), node_id);
             send_reply(req, node_tx.clone(), message::Payload::InitOk);
         }
-        Topology { topology } => todo!(),
         // Error { code, text } => todo!(),
         Send { key, msg } => {
             let offset = append_msg(node_tx.clone(), key, msg);
@@ -219,9 +231,19 @@ impl Node {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
+
+    fn next_msg_id(&mut self) -> usize {
+        let tmp = self.msg_id_cnt;
+        self.msg_id_cnt += 1;
+        tmp
+    }
+
+    fn get_node_id(&self) -> String {
+        self.id.clone()
+    }
 }
 
-fn start_node_manager() -> mpsc::Sender<NodeCommand> {
+fn start_node_manager(resp_router: Arc<Mutex<ResponseRouter>>) -> mpsc::Sender<NodeCommand> {
     let (tx, rx) = mpsc::channel();
     let mut node = Node {
         id: String::new(),
@@ -236,24 +258,134 @@ fn start_node_manager() -> mpsc::Sender<NodeCommand> {
             match rx.recv().unwrap() {
                 Init { id } => node.id = id,
                 GetNodeId { sender } => sender
-                    .send(node.id.clone())
+                    .send(node.get_node_id())
                     .expect("send node id through channel"),
                 NextMsgId { sender } => {
-                    sender.send(node.msg_id_cnt.clone()).unwrap();
-                    node.msg_id_cnt += 1;
+                    let next_msg_id = node.next_msg_id();
+                    sender.send(next_msg_id).unwrap();
                 }
                 LogAppend {
                     key,
                     msg,
                     sender_offset,
                 } => {
+                    // get next offset value from lin-kv
+
+                    // loop until cas goes through
+                    let next_offset = 'next_offset_loop: loop {
+                        // read last value for given key
+                        let msg_id = node.next_msg_id();
+                        let node_id = node.get_node_id();
+
+                        let (s, r) = mpsc::sync_channel(1);
+                        resp_router.lock().unwrap().register(msg_id, s);
+                        // resp_router.register(msg_id, s);
+                        send_msg(message::Message {
+                            src: node_id.clone(),
+                            dest: "lin-kv".to_string(),
+                            body: message::MessageBody {
+                                msg_id: Some(msg_id),
+                                in_reply_to: None,
+                                payload: message::Payload::Read { key: key.clone() },
+                            },
+                        });
+
+                        eprintln!("waiting for read response");
+
+                        // blocking wait for response
+                        let resp = r.recv().unwrap();
+
+                        let (s, r) = mpsc::sync_channel(1);
+                        let cur_offset = match resp.body.payload {
+                            message::Payload::Error { code, text } => {
+                                if code == 20 {
+                                    eprintln!("key doesn't exist, init empty key");
+                                    // key doesn't exist -> write operation
+                                    let write_op_id = node.next_msg_id();
+                                    let (ws, wr) = mpsc::sync_channel(1);
+                                    resp_router.lock().unwrap().register(write_op_id, ws);
+                                    // resp_router.register(msg_id, s);
+                                    send_msg(message::Message {
+                                        src: node_id.clone(),
+                                        dest: "lin-kv".to_string(),
+                                        body: message::MessageBody {
+                                            msg_id: Some(write_op_id),
+                                            in_reply_to: None,
+                                            payload: message::Payload::Write {
+                                                key: key.clone(),
+                                                value: 0,
+                                            },
+                                        },
+                                    });
+
+                                    eprintln!("waiting for write response");
+                                    let resp = wr.recv().unwrap();
+                                    match resp.body.payload {
+                                        message::Payload::WriteOk => break 'next_offset_loop 0,
+                                        message::Payload::Error { code, text } => {
+                                            panic!("write error {code}: {text}");
+                                        }
+                                        _ => panic!("unsupported response type"),
+                                    }
+                                } else {
+                                    panic!("read error: {code} {text}")
+                                }
+                            }
+                            message::Payload::ReadOk { value } => value,
+                            _ => panic!("unsupported response type"),
+                        };
+
+                        eprintln!("got cur offset: {cur_offset}");
+
+                        let next_offset_for_key = cur_offset + 1;
+                        // compare-and-swap to commit next offset value
+                        let linkv_cas_msg_id = node.next_msg_id();
+
+                        resp_router.lock().unwrap().register(linkv_cas_msg_id, s);
+                        // resp_router.register(linkv_cas_msg_id, s);
+                        send_msg(message::Message {
+                            src: node_id,
+                            dest: "lin-kv".to_string(),
+                            body: message::MessageBody {
+                                msg_id: Some(linkv_cas_msg_id),
+                                in_reply_to: None,
+                                payload: message::Payload::Cas {
+                                    key: key.clone(),
+                                    from: cur_offset,
+                                    to: next_offset_for_key.clone(),
+                                },
+                            },
+                        });
+                        eprintln!("waiting for cas response");
+                        // blocking wait for cas response
+                        let resp = r.recv().unwrap();
+                        match resp.body.payload {
+                            message::Payload::Error { code, text } => {
+                                if code == 22 {
+                                    eprint!("cas from value didn't match, repeat: {text}");
+                                    continue 'next_offset_loop;
+                                } else {
+                                    panic!("unexpected error: {code} {text}");
+                                }
+                            }
+                            message::Payload::CasOk {} => {
+                                break 'next_offset_loop next_offset_for_key
+                            }
+                            _ => panic!("unsupported response type"),
+                        }
+                    };
+
+                    eprintln!("appending logs to offset {next_offset}");
+
                     if let Some(log) = node.logs.get_mut(&key) {
-                        log.push(msg);
+                        log.insert(next_offset, msg);
                     } else {
-                        node.logs.insert(key.clone(), vec![msg]);
+                        let mut v = Vec::new();
+                        v.insert(next_offset, msg);
+                        node.logs.insert(key.clone(), v);
                     }
                     sender_offset
-                        .send(node.logs.get(&key).unwrap().len() - 1)
+                        .send(next_offset)
                         .expect("send offset via channel")
                 }
                 Poll {
@@ -279,6 +411,32 @@ fn start_node_manager() -> mpsc::Sender<NodeCommand> {
         }
     });
     tx
+}
+
+struct ResponseRouter {
+    resp: HashMap<usize, mpsc::SyncSender<message::Message>>,
+}
+
+impl ResponseRouter {
+    fn new() -> Self {
+        Self {
+            resp: HashMap::new(),
+        }
+    }
+
+    fn register(&mut self, reply_to: usize, sender: mpsc::SyncSender<message::Message>) {
+        self.resp.insert(reply_to, sender);
+    }
+
+    fn route(&mut self, reply_to: usize, msg: message::Message) -> Result<(), String> {
+        if let Some(sender) = self.resp.remove(&reply_to) {
+            sender
+                .send(msg)
+                .map_err(|e| format!("routing response err: {}", e))
+        } else {
+            Err("response not registered for given id".to_string())
+        }
+    }
 }
 
 #[cfg(test)]
