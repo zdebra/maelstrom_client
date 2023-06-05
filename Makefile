@@ -1,4 +1,4 @@
-MAELSTROM_BINARY = ../maelstrom/maelstrom
+MAELSTROM_BINARY = ./maelstrom/maelstrom
 BROADCAST_BINARY = target/debug/broadcast
 GROW_COUNTER_BINARY = target/debug/grow_counter
 KAFKA_BINARY = target/debug/kafka
