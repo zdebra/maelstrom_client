@@ -336,6 +336,17 @@ impl ResponseRouter {
     }
 }
 
+fn send_wait(
+    msg: message::Message,
+    resp_router: &Arc<Mutex<ResponseRouter>>,
+) -> Result<message::Message, String> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let msg_id = msg.body.msg_id.unwrap();
+    resp_router.lock().unwrap().register(msg_id, sender);
+    send_msg(msg);
+    receiver.recv().map_err(|e| format!("send wait err: {}", e))
+}
+
 fn find_next_offset_blocking(
     node: &mut Node,
     resp_router: &Arc<Mutex<ResponseRouter>>,
@@ -345,49 +356,45 @@ fn find_next_offset_blocking(
     let msg_id = node.next_msg_id();
     let node_id = node.get_node_id();
 
-    let (s, r) = mpsc::sync_channel(1);
-    resp_router.lock().unwrap().register(msg_id, s);
-    send_msg(message::Message {
-        src: node_id.clone(),
-        dest: "lin-kv".to_string(),
-        body: message::MessageBody {
-            msg_id: Some(msg_id),
-            in_reply_to: None,
-            payload: message::Payload::Read { key: key.clone() },
+    let read_resp = send_wait(
+        message::Message {
+            src: node_id.clone(),
+            dest: "lin-kv".to_string(),
+            body: message::MessageBody {
+                msg_id: Some(msg_id),
+                in_reply_to: None,
+                payload: message::Payload::Read { key: key.clone() },
+            },
         },
-    });
+        resp_router,
+    )
+    .unwrap();
 
-    eprintln!("waiting for read response");
-
-    // blocking wait for response
-    let resp = r.recv().unwrap();
-
-    let (s, r) = mpsc::sync_channel(1);
-    let cur_offset = match resp.body.payload {
+    let cur_offset = match read_resp.body.payload {
         message::Payload::Error { code, text } => {
             if code == 20 {
                 eprintln!("key doesn't exist, init empty key");
                 // key doesn't exist -> write operation
                 let write_op_id = node.next_msg_id();
-                let (ws, wr) = mpsc::sync_channel(1);
-                resp_router.lock().unwrap().register(write_op_id, ws);
-                // resp_router.register(msg_id, s);
-                send_msg(message::Message {
-                    src: node_id.clone(),
-                    dest: "lin-kv".to_string(),
-                    body: message::MessageBody {
-                        msg_id: Some(write_op_id),
-                        in_reply_to: None,
-                        payload: message::Payload::Write {
-                            key: key.clone(),
-                            value: 0,
+
+                let write_resp = send_wait(
+                    message::Message {
+                        src: node_id.clone(),
+                        dest: "lin-kv".to_string(),
+                        body: message::MessageBody {
+                            msg_id: Some(write_op_id),
+                            in_reply_to: None,
+                            payload: message::Payload::Write {
+                                key: key.clone(),
+                                value: 0,
+                            },
                         },
                     },
-                });
+                    resp_router,
+                )
+                .unwrap();
 
-                eprintln!("waiting for write response");
-                let resp = wr.recv().unwrap();
-                match resp.body.payload {
+                match write_resp.body.payload {
                     message::Payload::WriteOk => {
                         return 0;
                     }
@@ -409,25 +416,25 @@ fn find_next_offset_blocking(
     let next_offset_for_key = cur_offset + 1;
     // compare-and-swap to commit next offset value
     let linkv_cas_msg_id = node.next_msg_id();
-
-    resp_router.lock().unwrap().register(linkv_cas_msg_id, s);
-    send_msg(message::Message {
-        src: node_id,
-        dest: "lin-kv".to_string(),
-        body: message::MessageBody {
-            msg_id: Some(linkv_cas_msg_id),
-            in_reply_to: None,
-            payload: message::Payload::Cas {
-                key: key.clone(),
-                from: cur_offset,
-                to: next_offset_for_key.clone(),
+    let cas_resp = send_wait(
+        message::Message {
+            src: node_id,
+            dest: "lin-kv".to_string(),
+            body: message::MessageBody {
+                msg_id: Some(linkv_cas_msg_id),
+                in_reply_to: None,
+                payload: message::Payload::Cas {
+                    key: key.clone(),
+                    from: cur_offset,
+                    to: next_offset_for_key.clone(),
+                },
             },
         },
-    });
-    eprintln!("waiting for cas response");
-    // blocking wait for cas response
-    let resp = r.recv().unwrap();
-    match resp.body.payload {
+        resp_router,
+    )
+    .unwrap();
+
+    match cas_resp.body.payload {
         message::Payload::Error { code, text } => {
             if code == 22 {
                 eprint!("cas from value didn't match, repeat: {text}");
