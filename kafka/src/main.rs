@@ -269,111 +269,8 @@ fn start_node_manager(resp_router: Arc<Mutex<ResponseRouter>>) -> mpsc::Sender<N
                     msg,
                     sender_offset,
                 } => {
-                    // get next offset value from lin-kv
-
-                    // loop until cas goes through
-                    let next_offset = 'next_offset_loop: loop {
-                        // read last value for given key
-                        let msg_id = node.next_msg_id();
-                        let node_id = node.get_node_id();
-
-                        let (s, r) = mpsc::sync_channel(1);
-                        resp_router.lock().unwrap().register(msg_id, s);
-                        // resp_router.register(msg_id, s);
-                        send_msg(message::Message {
-                            src: node_id.clone(),
-                            dest: "lin-kv".to_string(),
-                            body: message::MessageBody {
-                                msg_id: Some(msg_id),
-                                in_reply_to: None,
-                                payload: message::Payload::Read { key: key.clone() },
-                            },
-                        });
-
-                        eprintln!("waiting for read response");
-
-                        // blocking wait for response
-                        let resp = r.recv().unwrap();
-
-                        let (s, r) = mpsc::sync_channel(1);
-                        let cur_offset = match resp.body.payload {
-                            message::Payload::Error { code, text } => {
-                                if code == 20 {
-                                    eprintln!("key doesn't exist, init empty key");
-                                    // key doesn't exist -> write operation
-                                    let write_op_id = node.next_msg_id();
-                                    let (ws, wr) = mpsc::sync_channel(1);
-                                    resp_router.lock().unwrap().register(write_op_id, ws);
-                                    // resp_router.register(msg_id, s);
-                                    send_msg(message::Message {
-                                        src: node_id.clone(),
-                                        dest: "lin-kv".to_string(),
-                                        body: message::MessageBody {
-                                            msg_id: Some(write_op_id),
-                                            in_reply_to: None,
-                                            payload: message::Payload::Write {
-                                                key: key.clone(),
-                                                value: 0,
-                                            },
-                                        },
-                                    });
-
-                                    eprintln!("waiting for write response");
-                                    let resp = wr.recv().unwrap();
-                                    match resp.body.payload {
-                                        message::Payload::WriteOk => break 'next_offset_loop 0,
-                                        message::Payload::Error { code, text } => {
-                                            panic!("write error {code}: {text}");
-                                        }
-                                        _ => panic!("unsupported response type"),
-                                    }
-                                } else {
-                                    panic!("read error: {code} {text}")
-                                }
-                            }
-                            message::Payload::ReadOk { value } => value,
-                            _ => panic!("unsupported response type"),
-                        };
-
-                        eprintln!("got cur offset: {cur_offset}");
-
-                        let next_offset_for_key = cur_offset + 1;
-                        // compare-and-swap to commit next offset value
-                        let linkv_cas_msg_id = node.next_msg_id();
-
-                        resp_router.lock().unwrap().register(linkv_cas_msg_id, s);
-                        // resp_router.register(linkv_cas_msg_id, s);
-                        send_msg(message::Message {
-                            src: node_id,
-                            dest: "lin-kv".to_string(),
-                            body: message::MessageBody {
-                                msg_id: Some(linkv_cas_msg_id),
-                                in_reply_to: None,
-                                payload: message::Payload::Cas {
-                                    key: key.clone(),
-                                    from: cur_offset,
-                                    to: next_offset_for_key.clone(),
-                                },
-                            },
-                        });
-                        eprintln!("waiting for cas response");
-                        // blocking wait for cas response
-                        let resp = r.recv().unwrap();
-                        match resp.body.payload {
-                            message::Payload::Error { code, text } => {
-                                if code == 22 {
-                                    eprint!("cas from value didn't match, repeat: {text}");
-                                    continue 'next_offset_loop;
-                                } else {
-                                    panic!("unexpected error: {code} {text}");
-                                }
-                            }
-                            message::Payload::CasOk {} => {
-                                break 'next_offset_loop next_offset_for_key
-                            }
-                            _ => panic!("unsupported response type"),
-                        }
-                    };
+                    let next_offset =
+                        find_next_offset_blocking(&mut node, &resp_router, key.clone());
 
                     eprintln!("appending logs to offset {next_offset}");
 
@@ -436,6 +333,113 @@ impl ResponseRouter {
         } else {
             Err("response not registered for given id".to_string())
         }
+    }
+}
+
+fn find_next_offset_blocking(
+    node: &mut Node,
+    resp_router: &Arc<Mutex<ResponseRouter>>,
+    key: String,
+) -> usize {
+    // read last value for given key
+    let msg_id = node.next_msg_id();
+    let node_id = node.get_node_id();
+
+    let (s, r) = mpsc::sync_channel(1);
+    resp_router.lock().unwrap().register(msg_id, s);
+    send_msg(message::Message {
+        src: node_id.clone(),
+        dest: "lin-kv".to_string(),
+        body: message::MessageBody {
+            msg_id: Some(msg_id),
+            in_reply_to: None,
+            payload: message::Payload::Read { key: key.clone() },
+        },
+    });
+
+    eprintln!("waiting for read response");
+
+    // blocking wait for response
+    let resp = r.recv().unwrap();
+
+    let (s, r) = mpsc::sync_channel(1);
+    let cur_offset = match resp.body.payload {
+        message::Payload::Error { code, text } => {
+            if code == 20 {
+                eprintln!("key doesn't exist, init empty key");
+                // key doesn't exist -> write operation
+                let write_op_id = node.next_msg_id();
+                let (ws, wr) = mpsc::sync_channel(1);
+                resp_router.lock().unwrap().register(write_op_id, ws);
+                // resp_router.register(msg_id, s);
+                send_msg(message::Message {
+                    src: node_id.clone(),
+                    dest: "lin-kv".to_string(),
+                    body: message::MessageBody {
+                        msg_id: Some(write_op_id),
+                        in_reply_to: None,
+                        payload: message::Payload::Write {
+                            key: key.clone(),
+                            value: 0,
+                        },
+                    },
+                });
+
+                eprintln!("waiting for write response");
+                let resp = wr.recv().unwrap();
+                match resp.body.payload {
+                    message::Payload::WriteOk => {
+                        return 0;
+                    }
+                    message::Payload::Error { code, text } => {
+                        panic!("write error {code}: {text}");
+                    }
+                    _ => panic!("unsupported response type"),
+                }
+            } else {
+                panic!("read error: {code} {text}")
+            }
+        }
+        message::Payload::ReadOk { value } => value,
+        _ => panic!("unsupported response type"),
+    };
+
+    eprintln!("got cur offset: {cur_offset}");
+
+    let next_offset_for_key = cur_offset + 1;
+    // compare-and-swap to commit next offset value
+    let linkv_cas_msg_id = node.next_msg_id();
+
+    resp_router.lock().unwrap().register(linkv_cas_msg_id, s);
+    send_msg(message::Message {
+        src: node_id,
+        dest: "lin-kv".to_string(),
+        body: message::MessageBody {
+            msg_id: Some(linkv_cas_msg_id),
+            in_reply_to: None,
+            payload: message::Payload::Cas {
+                key: key.clone(),
+                from: cur_offset,
+                to: next_offset_for_key.clone(),
+            },
+        },
+    });
+    eprintln!("waiting for cas response");
+    // blocking wait for cas response
+    let resp = r.recv().unwrap();
+    match resp.body.payload {
+        message::Payload::Error { code, text } => {
+            if code == 22 {
+                eprint!("cas from value didn't match, repeat: {text}");
+                return find_next_offset_blocking(node, resp_router, key);
+            } else {
+                panic!("unexpected error: {code} {text}");
+            }
+        }
+        message::Payload::CasOk {} => {
+            return next_offset_for_key;
+        }
+        _ => panic!("unsupported response type"),
     }
 }
 
