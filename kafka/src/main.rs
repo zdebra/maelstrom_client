@@ -354,54 +354,13 @@ fn find_next_offset_blocking(
     resp_router: &Arc<Mutex<ResponseRouter>>,
     key: String,
 ) -> usize {
-    // read last value for given key
-    let read_resp = send_wait(
-        message::Message::new_request(
-            node.get_node_id(),
-            LIN_KV.to_string(),
-            node.next_msg_id(),
-            message::Payload::Read { key: key.clone() },
-        ),
-        resp_router,
-    )
-    .unwrap();
-
-    let cur_offset = match read_resp.body.payload {
-        message::Payload::Error { code, text } => {
-            if code == 20 {
-                eprintln!("key doesn't exist, init empty key");
-                // key doesn't exist -> write operation
-                let write_resp = send_wait(
-                    message::Message::new_request(
-                        node.get_node_id(),
-                        LIN_KV.to_string(),
-                        node.next_msg_id(),
-                        message::Payload::Write {
-                            key: key.clone(),
-                            value: 0,
-                        },
-                    ),
-                    resp_router,
-                )
-                .unwrap();
-
-                match write_resp.body.payload {
-                    message::Payload::WriteOk => {
-                        return 0;
-                    }
-                    message::Payload::Error { code, text } => {
-                        panic!("write error {code}: {text}");
-                    }
-                    _ => panic!("unsupported response type"),
-                }
-            } else {
-                panic!("read error: {code} {text}")
-            }
+    let cur_offset = match get_offset_for_key(node, &key, resp_router) {
+        Offset::Ok { value } => value,
+        Offset::JustInitialized => {
+            // compare-and-swap is not required
+            return 0;
         }
-        message::Payload::ReadOk { value } => value,
-        _ => panic!("unsupported response type"),
     };
-
     eprintln!("got cur offset: {cur_offset}");
 
     let next_offset_for_key = cur_offset + 1;
@@ -433,6 +392,63 @@ fn find_next_offset_blocking(
         message::Payload::CasOk {} => {
             return next_offset_for_key;
         }
+        _ => panic!("unsupported response type"),
+    }
+}
+
+enum Offset {
+    Ok { value: usize },
+    JustInitialized,
+}
+
+fn get_offset_for_key(
+    node: &mut Node,
+    key: &String,
+    resp_router: &Arc<Mutex<ResponseRouter>>,
+) -> Offset {
+    let read_resp = send_wait(
+        message::Message::new_request(
+            node.get_node_id(),
+            LIN_KV.to_string(),
+            node.next_msg_id(),
+            message::Payload::Read { key: key.clone() },
+        ),
+        resp_router,
+    )
+    .unwrap();
+    match read_resp.body.payload {
+        message::Payload::Error { code, text } => {
+            if code == 20 {
+                eprintln!("key doesn't exist, init empty key");
+                // key doesn't exist -> init new record
+                let write_resp = send_wait(
+                    message::Message::new_request(
+                        node.get_node_id(),
+                        LIN_KV.to_string(),
+                        node.next_msg_id(),
+                        message::Payload::Write {
+                            key: key.clone(),
+                            value: 0,
+                        },
+                    ),
+                    resp_router,
+                )
+                .unwrap();
+
+                match write_resp.body.payload {
+                    message::Payload::WriteOk => {
+                        return Offset::JustInitialized;
+                    }
+                    message::Payload::Error { code, text } => {
+                        panic!("write error {code}: {text}");
+                    }
+                    _ => panic!("unsupported response type"),
+                }
+            } else {
+                panic!("read error: {code} {text}")
+            }
+        }
+        message::Payload::ReadOk { value } => Offset::Ok { value },
         _ => panic!("unsupported response type"),
     }
 }
