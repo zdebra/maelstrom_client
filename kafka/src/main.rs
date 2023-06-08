@@ -347,25 +347,21 @@ fn send_wait(
     receiver.recv().map_err(|e| format!("send wait err: {}", e))
 }
 
+const LIN_KV: &str = "lin-kv";
+
 fn find_next_offset_blocking(
     node: &mut Node,
     resp_router: &Arc<Mutex<ResponseRouter>>,
     key: String,
 ) -> usize {
     // read last value for given key
-    let msg_id = node.next_msg_id();
-    let node_id = node.get_node_id();
-
     let read_resp = send_wait(
-        message::Message {
-            src: node_id.clone(),
-            dest: "lin-kv".to_string(),
-            body: message::MessageBody {
-                msg_id: Some(msg_id),
-                in_reply_to: None,
-                payload: message::Payload::Read { key: key.clone() },
-            },
-        },
+        message::Message::new_request(
+            node.get_node_id(),
+            LIN_KV.to_string(),
+            node.next_msg_id(),
+            message::Payload::Read { key: key.clone() },
+        ),
         resp_router,
     )
     .unwrap();
@@ -375,21 +371,16 @@ fn find_next_offset_blocking(
             if code == 20 {
                 eprintln!("key doesn't exist, init empty key");
                 // key doesn't exist -> write operation
-                let write_op_id = node.next_msg_id();
-
                 let write_resp = send_wait(
-                    message::Message {
-                        src: node_id.clone(),
-                        dest: "lin-kv".to_string(),
-                        body: message::MessageBody {
-                            msg_id: Some(write_op_id),
-                            in_reply_to: None,
-                            payload: message::Payload::Write {
-                                key: key.clone(),
-                                value: 0,
-                            },
+                    message::Message::new_request(
+                        node.get_node_id(),
+                        LIN_KV.to_string(),
+                        node.next_msg_id(),
+                        message::Payload::Write {
+                            key: key.clone(),
+                            value: 0,
                         },
-                    },
+                    ),
                     resp_router,
                 )
                 .unwrap();
@@ -415,21 +406,17 @@ fn find_next_offset_blocking(
 
     let next_offset_for_key = cur_offset + 1;
     // compare-and-swap to commit next offset value
-    let linkv_cas_msg_id = node.next_msg_id();
     let cas_resp = send_wait(
-        message::Message {
-            src: node_id,
-            dest: "lin-kv".to_string(),
-            body: message::MessageBody {
-                msg_id: Some(linkv_cas_msg_id),
-                in_reply_to: None,
-                payload: message::Payload::Cas {
-                    key: key.clone(),
-                    from: cur_offset,
-                    to: next_offset_for_key.clone(),
-                },
+        message::Message::new_request(
+            node.get_node_id(),
+            LIN_KV.to_string(),
+            node.next_msg_id(),
+            message::Payload::Cas {
+                key: key.clone(),
+                from: cur_offset,
+                to: next_offset_for_key.clone(),
             },
-        },
+        ),
         resp_router,
     )
     .unwrap();

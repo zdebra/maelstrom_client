@@ -8,6 +8,20 @@ pub struct Message {
     pub body: MessageBody,
 }
 
+impl Message {
+    pub fn new_request(src: String, dest: String, msg_id: usize, payload: Payload) -> Self {
+        Self {
+            src,
+            dest,
+            body: MessageBody {
+                msg_id: Some(msg_id),
+                in_reply_to: None,
+                payload,
+            },
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct MessageBody {
