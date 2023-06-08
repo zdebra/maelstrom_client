@@ -243,6 +243,8 @@ impl Node {
     }
 }
 
+const PREFIX_KEY_WRITE: &str = "W_";
+
 fn start_node_manager(resp_router: Arc<Mutex<ResponseRouter>>) -> mpsc::Sender<NodeCommand> {
     let (tx, rx) = mpsc::channel();
     let mut node = Node {
@@ -269,8 +271,11 @@ fn start_node_manager(resp_router: Arc<Mutex<ResponseRouter>>) -> mpsc::Sender<N
                     msg,
                     sender_offset,
                 } => {
-                    let next_offset =
-                        find_next_offset_blocking(&mut node, &resp_router, key.clone());
+                    let next_offset = find_next_offset_blocking(
+                        &mut node,
+                        &resp_router,
+                        PREFIX_KEY_WRITE.to_string() + &key,
+                    );
 
                     eprintln!("appending logs to offset {next_offset}");
 
