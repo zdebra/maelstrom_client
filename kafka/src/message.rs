@@ -80,17 +80,22 @@ pub enum Payload {
     ReadOk {
         value: usize,
     },
-    // KV-write
     Write {
         key: String,
         value: usize,
     },
     WriteOk,
-    // KV-Cas
     Cas {
         key: String,
         from: usize,
         to: usize,
     },
     CasOk,
+    // Gossip sends a message with, for that node, unknown information
+    Gossip {
+        logs: HashMap<String, Vec<usize>>, // log key to new messages
+        logs_starting_offset: HashMap<String, usize>, // log key to starting offset
+        client_offsets: HashMap<String, HashMap<String, usize>>, // client id to map of key to offset
+    },
+    GossipOk,
 }

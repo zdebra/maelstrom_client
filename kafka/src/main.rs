@@ -199,9 +199,15 @@ enum NodeCommand {
 
 struct Node {
     id: String,
-    logs: HashMap<String, Vec<usize>>,
+    logs: HashMap<String, Vec<usize>>, // gossip
     msg_id_cnt: usize,
-    client_offsets: HashMap<String, HashMap<String, usize>>,
+    client_offsets: HashMap<String, HashMap<String, usize>>, // gossip
+    neighbour_knowledge: HashMap<String, OtherNodeKnowledge>, // node id to OtherNodeKnowledge
+}
+
+struct OtherNodeKnowledge {
+    logs: HashMap<String, usize>, // log key to offset
+    client_offsets: HashMap<String, HashMap<String, usize>>, // client id to map of key to offset
 }
 
 impl Node {
@@ -252,6 +258,7 @@ fn start_node_manager(resp_router: Arc<Mutex<ResponseRouter>>) -> mpsc::Sender<N
         logs: HashMap::new(),
         msg_id_cnt: 0,
         client_offsets: HashMap::new(),
+        neighbour_knowledge: HashMap::new(),
     };
 
     std::thread::spawn(move || {
@@ -472,6 +479,7 @@ mod tests {
             ]),
             msg_id_cnt: 0,
             client_offsets: HashMap::new(),
+            neighbour_knowledge: todo!(),
         };
 
         assert_eq!(
@@ -518,6 +526,7 @@ mod tests {
                     ]),
                 ),
             ]),
+            neighbour_knowledge: todo!(),
         };
 
         assert_eq!(
