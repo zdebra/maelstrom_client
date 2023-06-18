@@ -62,6 +62,21 @@ fn process_msg(req: message::Message, node_tx: mpsc::Sender<NodeCommand>) {
             eprintln!("hadnling echo..");
             send_reply(req, node_tx.clone(), message::Payload::EchoOk { echo });
         }
+        Gossip {
+            last_log_offset,
+            last_client_offsets,
+        } => {
+            eprintln!("handling gossip");
+            let diffs = get_diffs(node_tx.clone(), last_log_offset, last_client_offsets);
+            send_reply(
+                req,
+                node_tx.clone(),
+                message::Payload::GossipOk {
+                    diff_logs: diffs.0,
+                    diff_client_offsets: diffs.1,
+                },
+            )
+        }
         _ => panic!("unexpected branch of code"),
     }
 }
@@ -167,6 +182,25 @@ fn list_committed_offsets(
     rx.recv().expect("recv commited offsets from channel")
 }
 
+fn get_diffs(
+    node_tx: mpsc::Sender<NodeCommand>,
+    last_log_offset: HashMap<String, usize>, // key to offset
+    last_client_offsets: HashMap<String, HashMap<String, usize>>, // client id to map of key to offset
+) -> (
+    Vec<message::LogDiff>,
+    HashMap<String, HashMap<String, usize>>,
+) {
+    let (tx, rx) = mpsc::channel();
+    node_tx
+        .send(NodeCommand::GetDiffs {
+            last_log_offset,
+            last_client_offsets,
+            sender_diff: tx,
+        })
+        .expect("get diffs");
+    rx.recv().expect("recv diffs from channel")
+}
+
 enum NodeCommand {
     Init {
         id: String,
@@ -195,6 +229,15 @@ enum NodeCommand {
         keys: Vec<String>,
         sender_offsets: mpsc::Sender<HashMap<String, usize>>,
     },
+    GetDiffs {
+        last_log_offset: HashMap<String, usize>, // key to offset
+        last_client_offsets: HashMap<String, HashMap<String, usize>>, // client id to map of key to offset
+        sender_diff: mpsc::Sender<(
+            Vec<message::LogDiff>,
+            HashMap<String, HashMap<String, usize>>,
+        )>,
+    },
+    SyncNow,
 }
 
 struct Node {
@@ -202,12 +245,6 @@ struct Node {
     logs: HashMap<String, Vec<usize>>, // gossip
     msg_id_cnt: usize,
     client_offsets: HashMap<String, HashMap<String, usize>>, // gossip
-    neighbour_knowledge: HashMap<String, OtherNodeKnowledge>, // node id to OtherNodeKnowledge
-}
-
-struct OtherNodeKnowledge {
-    logs: HashMap<String, usize>, // log key to offset
-    client_offsets: HashMap<String, HashMap<String, usize>>, // client id to map of key to offset
 }
 
 impl Node {
@@ -247,6 +284,62 @@ impl Node {
     fn get_node_id(&self) -> String {
         self.id.clone()
     }
+
+    fn log_diffs(&self, last_log_offset: HashMap<String, usize>) -> Vec<message::LogDiff> {
+        let mut diffs = Vec::new();
+        for (key, local_logs) in &self.logs {
+            let remote_offset = match last_log_offset.get(key) {
+                Some(n) => *n,
+                None => {
+                    diffs.push(message::LogDiff {
+                        key: key.to_string(),
+                        messages: local_logs.to_vec(),
+                        starting_offset: 0,
+                    });
+                    continue;
+                }
+            };
+            if local_logs.len() <= remote_offset {
+                continue;
+            }
+            let start_offset = remote_offset + 1;
+            diffs.push(message::LogDiff {
+                key: key.to_string(),
+                messages: local_logs[start_offset..].to_vec(),
+                starting_offset: start_offset,
+            });
+        }
+        diffs.sort();
+        diffs
+    }
+
+    fn client_offset_diffs(
+        &self,
+        last_client_offsets: HashMap<String, HashMap<String, usize>>,
+    ) -> HashMap<String, HashMap<String, usize>> {
+        let mut out = HashMap::new();
+        for (client_id, key_offset) in &self.client_offsets {
+            let mut diffs = HashMap::new();
+            let empty_hm = HashMap::new();
+            let remote_key_offset = match last_client_offsets.get(client_id) {
+                Some(x) => x,
+                None => &empty_hm,
+            };
+            for (key, local_offset) in key_offset {
+                let remote_offset = match remote_key_offset.get(key) {
+                    Some(n) => *n,
+                    None => 0,
+                };
+                if remote_offset >= *local_offset {
+                    continue;
+                }
+                diffs.insert(key.to_string(), *local_offset);
+            }
+
+            out.insert(client_id.to_string(), diffs);
+        }
+        out
+    }
 }
 
 const PREFIX_KEY_WRITE: &str = "W_";
@@ -258,8 +351,13 @@ fn start_node_manager(resp_router: Arc<Mutex<ResponseRouter>>) -> mpsc::Sender<N
         logs: HashMap::new(),
         msg_id_cnt: 0,
         client_offsets: HashMap::new(),
-        neighbour_knowledge: HashMap::new(),
     };
+
+    let txc = tx.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        txc.send(NodeCommand::SyncNow).unwrap()
+    });
 
     std::thread::spawn(move || {
         use NodeCommand::*;
@@ -315,6 +413,19 @@ fn start_node_manager(resp_router: Arc<Mutex<ResponseRouter>>) -> mpsc::Sender<N
                     sender_offsets
                         .send(client_offsets)
                         .expect("client offsets sent");
+                }
+                GetDiffs {
+                    last_log_offset,
+                    last_client_offsets,
+                    sender_diff,
+                } => {
+                    let log_diffs = node.log_diffs(last_log_offset);
+                    let client_offset_diffs = node.client_offset_diffs(last_client_offsets);
+                    sender_diff.send((log_diffs, client_offset_diffs)).unwrap();
+                }
+                SyncNow => {
+                    eprintln!("syncing with other nodes now!");
+                    todo!();
                 }
             }
         }
@@ -467,6 +578,8 @@ fn get_offset_for_key(
 
 #[cfg(test)]
 mod tests {
+    use crate::message::LogDiff;
+
     use super::*;
     #[test]
     fn node_pull_logs() {
@@ -479,7 +592,6 @@ mod tests {
             ]),
             msg_id_cnt: 0,
             client_offsets: HashMap::new(),
-            neighbour_knowledge: todo!(),
         };
 
         assert_eq!(
@@ -526,7 +638,6 @@ mod tests {
                     ]),
                 ),
             ]),
-            neighbour_knowledge: todo!(),
         };
 
         assert_eq!(
@@ -536,6 +647,105 @@ mod tests {
         assert_eq!(
             HashMap::from([("k1".to_string(), 50), ("k3".to_string(), 150)]),
             node.client_offsets("c2".to_string(), vec!["k1".to_string(), "k3".to_string()])
+        );
+    }
+
+    #[test]
+    fn node_log_diffs() {
+        let node = Node {
+            id: "id".to_string(),
+            logs: HashMap::from([
+                ("k1".to_string(), vec![1, 2, 3, 4]),
+                ("k2".to_string(), vec![10, 20, 30, 40]),
+                ("k3".to_string(), vec![100, 200, 300, 400]),
+                ("k4".to_string(), vec![1000, 2000, 3000, 4000]),
+            ]),
+            msg_id_cnt: 0,
+            client_offsets: HashMap::new(),
+        };
+
+        let mut expected = vec![
+            message::LogDiff {
+                key: "k1".to_string(),
+                messages: vec![3, 4],
+                starting_offset: 2,
+            },
+            message::LogDiff {
+                key: "k2".to_string(),
+                messages: vec![40],
+                starting_offset: 3,
+            },
+            message::LogDiff {
+                key: "k3".to_string(),
+                messages: vec![200, 300, 400],
+                starting_offset: 1,
+            },
+            message::LogDiff {
+                key: "k4".to_string(),
+                messages: vec![1000, 2000, 3000, 4000],
+                starting_offset: 0,
+            },
+        ];
+        expected.sort();
+        assert_eq!(
+            expected,
+            node.log_diffs(HashMap::from([
+                ("k1".to_string(), 1),
+                ("k2".to_string(), 2),
+                ("k3".to_string(), 0),
+            ]))
+        );
+    }
+
+    #[test]
+    fn node_client_offset_diffs() {
+        let node = Node {
+            id: "id".to_string(),
+            logs: HashMap::new(),
+            msg_id_cnt: 0,
+            client_offsets: HashMap::from([
+                (
+                    "c1".to_string(),
+                    HashMap::from([
+                        ("k1".to_string(), 5),
+                        ("k2".to_string(), 10),
+                        ("k3".to_string(), 15),
+                    ]),
+                ),
+                (
+                    "c2".to_string(),
+                    HashMap::from([
+                        ("k1".to_string(), 50),
+                        ("k2".to_string(), 100),
+                        ("k3".to_string(), 150),
+                    ]),
+                ),
+            ]),
+        };
+
+        assert_eq!(
+            HashMap::from([
+                (
+                    "c1".to_string(),
+                    HashMap::from([("k1".to_string(), 5), ("k3".to_string(), 15),])
+                ),
+                (
+                    "c2".to_string(),
+                    HashMap::from([
+                        ("k1".to_string(), 50),
+                        ("k2".to_string(), 100),
+                        ("k3".to_string(), 150),
+                    ])
+                )
+            ]),
+            node.client_offset_diffs(HashMap::from([(
+                "c1".to_string(),
+                HashMap::from([
+                    ("k1".to_string(), 3),
+                    ("k2".to_string(), 10),
+                    ("k3".to_string(), 10),
+                ])
+            )]))
         );
     }
 }

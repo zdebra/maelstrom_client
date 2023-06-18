@@ -91,11 +91,19 @@ pub enum Payload {
         to: usize,
     },
     CasOk,
-    // Gossip sends a message with, for that node, unknown information
     Gossip {
-        logs: HashMap<String, Vec<usize>>, // log key to new messages
-        logs_starting_offset: HashMap<String, usize>, // log key to starting offset
-        client_offsets: HashMap<String, HashMap<String, usize>>, // client id to map of key to offset
+        last_log_offset: HashMap<String, usize>, // key to offset
+        last_client_offsets: HashMap<String, HashMap<String, usize>>, // client id to map of key to offset
     },
-    GossipOk,
+    GossipOk {
+        diff_logs: Vec<LogDiff>,
+        diff_client_offsets: HashMap<String, HashMap<String, usize>>, // client id to map of key to offset
+    },
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Ord, PartialOrd, Eq)]
+pub struct LogDiff {
+    pub key: String,
+    pub messages: Vec<usize>,
+    pub starting_offset: usize,
 }
