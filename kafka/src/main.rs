@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io::{self, BufRead, Write},
     sync::{mpsc, Arc, Mutex},
 };
@@ -34,7 +34,7 @@ fn process_msg(req: message::Message, node_tx: mpsc::Sender<NodeCommand>) {
     match req.body.payload.clone() {
         Init { node_id, node_ids } => {
             eprintln!("initializing node..");
-            node_init(node_tx.clone(), node_id);
+            node_init(node_tx.clone(), node_id, node_ids);
             send_reply(req, node_tx.clone(), message::Payload::InitOk);
         }
         // Error { code, text } => todo!(),
@@ -77,6 +77,7 @@ fn process_msg(req: message::Message, node_tx: mpsc::Sender<NodeCommand>) {
                 },
             )
         }
+        // todo: implement GossipOk which will update node's data
         _ => panic!("unexpected branch of code"),
     }
 }
@@ -121,9 +122,12 @@ fn next_msg_id(node_tx: mpsc::Sender<NodeCommand>) -> usize {
     rx.recv().expect("receive msg_id")
 }
 
-fn node_init(node_tx: mpsc::Sender<NodeCommand>, node_id: String) {
+fn node_init(node_tx: mpsc::Sender<NodeCommand>, node_id: String, neighbours: Vec<String>) {
     node_tx
-        .send(NodeCommand::Init { id: node_id })
+        .send(NodeCommand::Init {
+            id: node_id,
+            neighbours: neighbours,
+        })
         .expect("send node init cmd");
 }
 
@@ -192,7 +196,7 @@ fn get_diffs(
 ) {
     let (tx, rx) = mpsc::channel();
     node_tx
-        .send(NodeCommand::GetDiffs {
+        .send(NodeCommand::InfraGetDiffs {
             last_log_offset,
             last_client_offsets,
             sender_diff: tx,
@@ -204,6 +208,7 @@ fn get_diffs(
 enum NodeCommand {
     Init {
         id: String,
+        neighbours: Vec<String>,
     },
     GetNodeId {
         sender: mpsc::Sender<String>,
@@ -229,7 +234,7 @@ enum NodeCommand {
         keys: Vec<String>,
         sender_offsets: mpsc::Sender<HashMap<String, usize>>,
     },
-    GetDiffs {
+    InfraGetDiffs {
         last_log_offset: HashMap<String, usize>, // key to offset
         last_client_offsets: HashMap<String, HashMap<String, usize>>, // client id to map of key to offset
         sender_diff: mpsc::Sender<(
@@ -237,7 +242,7 @@ enum NodeCommand {
             HashMap<String, HashMap<String, usize>>,
         )>,
     },
-    SyncNow,
+    InfraSyncNow,
 }
 
 struct Node {
@@ -245,6 +250,7 @@ struct Node {
     logs: HashMap<String, Vec<usize>>, // gossip
     msg_id_cnt: usize,
     client_offsets: HashMap<String, HashMap<String, usize>>, // gossip
+    neighbours: Vec<String>,
 }
 
 impl Node {
@@ -279,6 +285,10 @@ impl Node {
         let tmp = self.msg_id_cnt;
         self.msg_id_cnt += 1;
         tmp
+    }
+
+    fn next_n_msg_ids(&mut self, n: usize) -> Vec<usize> {
+        (0..n).map(|_| self.next_msg_id()).collect()
     }
 
     fn get_node_id(&self) -> String {
@@ -340,6 +350,26 @@ impl Node {
         }
         out
     }
+
+    fn request_updates(&mut self) {
+        let mut last_log_offset = HashMap::new();
+        for (key, messages) in &self.logs {
+            last_log_offset.insert(key.to_string(), messages.len() - 1);
+        }
+
+        let mut allocted_msg_ids = VecDeque::from(self.next_n_msg_ids(self.neighbours.len()));
+        for neighbour in &self.neighbours {
+            send_msg(message::Message::new_request(
+                self.get_node_id(),
+                neighbour.clone(),
+                allocted_msg_ids.pop_front().unwrap(),
+                message::Payload::Gossip {
+                    last_log_offset: last_log_offset.clone(),
+                    last_client_offsets: self.client_offsets.clone(),
+                },
+            ))
+        }
+    }
 }
 
 const PREFIX_KEY_WRITE: &str = "W_";
@@ -351,19 +381,23 @@ fn start_node_manager(resp_router: Arc<Mutex<ResponseRouter>>) -> mpsc::Sender<N
         logs: HashMap::new(),
         msg_id_cnt: 0,
         client_offsets: HashMap::new(),
+        neighbours: Vec::new(),
     };
 
     let txc = tx.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(2));
-        txc.send(NodeCommand::SyncNow).unwrap()
+        txc.send(NodeCommand::InfraSyncNow).unwrap()
     });
 
     std::thread::spawn(move || {
         use NodeCommand::*;
         loop {
             match rx.recv().unwrap() {
-                Init { id } => node.id = id,
+                Init { id, neighbours } => {
+                    node.id = id;
+                    node.neighbours = neighbours;
+                }
                 GetNodeId { sender } => sender
                     .send(node.get_node_id())
                     .expect("send node id through channel"),
@@ -414,7 +448,7 @@ fn start_node_manager(resp_router: Arc<Mutex<ResponseRouter>>) -> mpsc::Sender<N
                         .send(client_offsets)
                         .expect("client offsets sent");
                 }
-                GetDiffs {
+                InfraGetDiffs {
                     last_log_offset,
                     last_client_offsets,
                     sender_diff,
@@ -423,9 +457,9 @@ fn start_node_manager(resp_router: Arc<Mutex<ResponseRouter>>) -> mpsc::Sender<N
                     let client_offset_diffs = node.client_offset_diffs(last_client_offsets);
                     sender_diff.send((log_diffs, client_offset_diffs)).unwrap();
                 }
-                SyncNow => {
-                    eprintln!("syncing with other nodes now!");
-                    todo!();
+                InfraSyncNow => {
+                    eprintln!("init syncing with other nodes now!");
+                    node.request_updates();
                 }
             }
         }
@@ -592,6 +626,7 @@ mod tests {
             ]),
             msg_id_cnt: 0,
             client_offsets: HashMap::new(),
+            neighbours: Vec::new(),
         };
 
         assert_eq!(
@@ -638,6 +673,7 @@ mod tests {
                     ]),
                 ),
             ]),
+            neighbours: Vec::new(),
         };
 
         assert_eq!(
@@ -662,6 +698,7 @@ mod tests {
             ]),
             msg_id_cnt: 0,
             client_offsets: HashMap::new(),
+            neighbours: Vec::new(),
         };
 
         let mut expected = vec![
@@ -721,6 +758,7 @@ mod tests {
                     ]),
                 ),
             ]),
+            neighbours: Vec::new(),
         };
 
         assert_eq!(
