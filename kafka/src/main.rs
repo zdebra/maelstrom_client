@@ -216,19 +216,18 @@ fn apply_diffs(
     diff_logs: Vec<message::LogDiff>,
     diff_client_offsets: HashMap<String, HashMap<String, usize>>,
 ) {
-    node_tx.send(NodeCommand::InfraApplyDiffs {
-        diff_logs,
-        diff_client_offsets,
-    });
+    node_tx
+        .send(NodeCommand::InfraApplyDiffs {
+            diff_logs,
+            diff_client_offsets,
+        })
+        .expect("apply diffs")
 }
 
 enum NodeCommand {
     Init {
         id: String,
         neighbours: Vec<String>,
-    },
-    GetNodeId {
-        sender: mpsc::Sender<String>,
     },
     NextMsgId {
         sender: mpsc::Sender<usize>,
@@ -478,9 +477,6 @@ fn start_node_manager(resp_router: Arc<Mutex<ResponseRouter>>) -> mpsc::Sender<N
                     node.id = id;
                     node.neighbours = neighbours;
                 }
-                GetNodeId { sender } => sender
-                    .send(node.get_node_id())
-                    .expect("send node id through channel"),
                 NextMsgId { sender } => {
                     let next_msg_id = node.next_msg_id();
                     sender.send(next_msg_id).unwrap();
