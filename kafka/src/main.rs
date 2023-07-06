@@ -77,7 +77,13 @@ fn process_msg(req: message::Message, node_tx: mpsc::Sender<NodeCommand>) {
                 },
             )
         }
-        // todo: implement GossipOk which will update node's data
+        GossipOk {
+            diff_logs,
+            diff_client_offsets,
+        } => {
+            eprintln!("handling response to previously sent requests for synchronization");
+            apply_diffs(node_tx.clone(), diff_logs, diff_client_offsets);
+        }
         _ => panic!("unexpected branch of code"),
     }
 }
@@ -205,6 +211,17 @@ fn get_diffs(
     rx.recv().expect("recv diffs from channel")
 }
 
+fn apply_diffs(
+    node_tx: mpsc::Sender<NodeCommand>,
+    diff_logs: Vec<message::LogDiff>,
+    diff_client_offsets: HashMap<String, HashMap<String, usize>>,
+) {
+    node_tx.send(NodeCommand::InfraApplyDiffs {
+        diff_logs,
+        diff_client_offsets,
+    });
+}
+
 enum NodeCommand {
     Init {
         id: String,
@@ -243,6 +260,10 @@ enum NodeCommand {
         )>,
     },
     InfraSyncNow,
+    InfraApplyDiffs {
+        diff_logs: Vec<message::LogDiff>,
+        diff_client_offsets: HashMap<String, HashMap<String, usize>>,
+    },
 }
 
 struct Node {
@@ -370,6 +391,65 @@ impl Node {
             ))
         }
     }
+
+    fn apply_diff_logs(&mut self, diff_logs: Vec<message::LogDiff>) {
+        for diff_log in diff_logs {
+            if let Some(log) = self.logs.get_mut(&diff_log.key) {
+                // the log with given key is there, let's update the value
+                let diff_size = diff_log.messages.len();
+                let last_local_offset = log.len() - 1;
+                if diff_log.starting_offset > last_local_offset + 1 {
+                    panic!(
+                        "incoming starting offset `{}` is bigger than local offset `{}` for key `{}`",
+                        diff_log.starting_offset,
+                        last_local_offset,
+                        diff_log.key
+                    );
+                }
+                for i in 0..diff_size {
+                    let index = i + diff_log.starting_offset;
+                    if index > log.len() - 1 {
+                        log.push(diff_log.messages[i])
+                    } else {
+                        log[index] = diff_log.messages[i];
+                    }
+                }
+            } else {
+                // the log with given key is not present at all, let's create the record
+                if diff_log.starting_offset != 0 {
+                    panic!(
+                        "starting offset is not zero while the record was not found for key `{}`",
+                        diff_log.key
+                    )
+                }
+                self.logs.insert(diff_log.key, diff_log.messages);
+            }
+        }
+    }
+
+    fn apply_diff_client_offsets(
+        &mut self,
+        diff_client_offsets: HashMap<String, HashMap<String, usize>>,
+    ) {
+        for (client, diff_offsets) in diff_client_offsets {
+            if let Some(local_client) = self.client_offsets.get_mut(&client) {
+                for (diff_key, diff_offset) in diff_offsets {
+                    if let Some(local_client_offset) = local_client.get_mut(&diff_key) {
+                        // update client's `diff_key` value
+                        if diff_offset > *local_client_offset {
+                            *local_client_offset = diff_offset;
+                        }
+                    } else {
+                        // existing client doesn't heard about `diff_key`
+                        local_client.insert(diff_key, diff_offset);
+                    }
+                }
+            } else {
+                // local client not found; let's create one
+                self.client_offsets.insert(client, diff_offsets);
+            }
+        }
+    }
 }
 
 const PREFIX_KEY_WRITE: &str = "W_";
@@ -460,6 +540,13 @@ fn start_node_manager(resp_router: Arc<Mutex<ResponseRouter>>) -> mpsc::Sender<N
                 InfraSyncNow => {
                     eprintln!("init syncing with other nodes now!");
                     node.request_updates();
+                }
+                InfraApplyDiffs {
+                    diff_logs,
+                    diff_client_offsets,
+                } => {
+                    node.apply_diff_logs(diff_logs);
+                    node.apply_diff_client_offsets(diff_client_offsets);
                 }
             }
         }
@@ -784,6 +871,145 @@ mod tests {
                     ("k3".to_string(), 10),
                 ])
             )]))
+        );
+    }
+
+    #[test]
+    fn node_apply_diff_logs() {
+        let mut node = Node {
+            id: "id".to_string(),
+            logs: HashMap::from([
+                ("k1".to_string(), vec![1, 2, 3, 4]),
+                ("k2".to_string(), vec![10, 20, 30, 40]),
+                ("k3".to_string(), vec![100, 200, 300, 400]),
+                ("k4".to_string(), vec![1000, 2000, 3000, 4000]),
+            ]),
+            msg_id_cnt: 0,
+            client_offsets: HashMap::new(),
+            neighbours: Vec::new(),
+        };
+
+        // green path scenarios
+        let diff_logs = vec![
+            LogDiff {
+                key: "k1".to_string(),
+                messages: vec![5, 6, 7, 8],
+                starting_offset: 4,
+            },
+            LogDiff {
+                key: "k2".to_string(),
+                messages: vec![30, 40, 50],
+                starting_offset: 2,
+            },
+            LogDiff {
+                key: "k3".to_string(),
+                messages: vec![111],
+                starting_offset: 0,
+            },
+            LogDiff {
+                key: "k5".to_string(),
+                messages: vec![10_000, 20_000],
+                starting_offset: 0,
+            },
+        ];
+        node.apply_diff_logs(diff_logs);
+        assert_eq!(
+            vec![1, 2, 3, 4, 5, 6, 7, 8],
+            *node.logs.get(&"k1".to_string()).unwrap()
+        );
+        assert_eq!(
+            vec![10, 20, 30, 40, 50],
+            *node.logs.get(&"k2".to_string()).unwrap()
+        );
+        assert_eq!(
+            vec![111, 200, 300, 400],
+            *node.logs.get(&"k3".to_string()).unwrap()
+        );
+        assert_eq!(
+            vec![10_000, 20_000],
+            *node.logs.get(&"k5".to_string()).unwrap()
+        );
+
+        // panic: there is a gap in message indexes
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            node.apply_diff_logs(vec![LogDiff {
+                key: "k4".to_string(),
+                messages: vec![6000],
+                starting_offset: 5,
+            }])
+        }));
+        assert!(res.is_err());
+
+        // panic: a new message key not starting from 0 index
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            node.apply_diff_logs(vec![LogDiff {
+                key: "k6".to_string(),
+                messages: vec![6000],
+                starting_offset: 2,
+            }])
+        }));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn node_apply_client_offset_diffs() {
+        let mut node = Node {
+            id: "id".to_string(),
+            logs: HashMap::new(),
+            msg_id_cnt: 0,
+            client_offsets: HashMap::from([
+                (
+                    "c1".to_string(),
+                    HashMap::from([
+                        ("k1".to_string(), 5),
+                        ("k2".to_string(), 10),
+                        ("k3".to_string(), 15),
+                    ]),
+                ),
+                (
+                    "c2".to_string(),
+                    HashMap::from([
+                        ("k1".to_string(), 50),
+                        ("k2".to_string(), 100),
+                        ("k3".to_string(), 150),
+                    ]),
+                ),
+            ]),
+            neighbours: Vec::new(),
+        };
+
+        node.apply_diff_client_offsets(HashMap::from([
+            ("c1".to_string(), HashMap::from([("k1".to_string(), 6)])),
+            ("c3".to_string(), HashMap::from([("k1".to_string(), 12)])),
+            ("c2".to_string(), HashMap::from([("k4".to_string(), 1)])),
+        ]));
+
+        // insert new client
+        assert_eq!(
+            HashMap::from([("k1".to_string(), 12)]),
+            *node.client_offsets.get(&"c3".to_string()).unwrap()
+        );
+
+        // offset update
+        assert_eq!(
+            6,
+            *node
+                .client_offsets
+                .get(&"c1".to_string())
+                .unwrap()
+                .get(&"k1".to_string())
+                .unwrap()
+        );
+
+        // existing client's new key
+        assert_eq!(
+            1,
+            *node
+                .client_offsets
+                .get(&"c2".to_string())
+                .unwrap()
+                .get(&"k4".to_string())
+                .unwrap()
         );
     }
 }
