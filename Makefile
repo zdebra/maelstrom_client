@@ -29,5 +29,8 @@ echo_kafka: build
 kafka: build
 	$(MAELSTROM_BINARY) test -w kafka --bin $(KAFKA_BINARY) --node-count 1 --concurrency 2n --time-limit 20 --rate 1000 --log-stderr
 
+kafka_multi: build
+	$(MAELSTROM_BINARY) test -w kafka --bin $(KAFKA_BINARY) --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --log-stderr
+
 build:
 	cargo build
