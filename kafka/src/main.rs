@@ -12,8 +12,14 @@ fn main() {
 
     eprintln!("starting the loop...");
     loop {
-        let msg = receive_msg();
+        let mut msg = receive_msg();
         let node_tx = node_tx.clone();
+
+        if let message::Payload::GossipOk { .. } = msg.body.payload {
+            // to pass trough the resp_router
+            msg.body.in_reply_to = None
+        }
+
         if let Some(in_reply_to) = msg.body.in_reply_to {
             resp_router
                 .clone()
