@@ -27,6 +27,12 @@ test = false
 bench = false
 path="kafka/src/main.rs"
 
+[[bin]]
+name= "kv-store"
+test = false
+bench = false
+path="kv-store/src/main.rs"
+
 [dependencies]
 anyhow = "1.0.70"
 chrono = "0.4.24"

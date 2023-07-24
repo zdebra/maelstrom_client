@@ -2,6 +2,7 @@ MAELSTROM_BINARY = ./maelstrom/maelstrom
 BROADCAST_BINARY = target/debug/broadcast
 GROW_COUNTER_BINARY = target/debug/grow_counter
 KAFKA_BINARY = target/debug/kafka
+KV_STORE_BINARY = target/debug/kv-store
 
 
 echo: build
@@ -31,6 +32,9 @@ kafka: build
 
 kafka_multi: build
 	$(MAELSTROM_BINARY) test -w kafka --bin $(KAFKA_BINARY) --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --log-stderr
+
+kv_store: build
+	$(MAELSTROM_BINARY) test -w txn-rw-register --bin $(KV_STORE_BINARY) --node-count 1 --time-limit 20 --rate 1000 --concurrency 2n --consistency-models read-uncommitted --availability total --log-stderr
 
 build:
 	cargo build
