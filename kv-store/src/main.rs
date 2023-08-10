@@ -46,27 +46,55 @@ fn process_msg(req: message::Message, last_msg_id: &mut usize, kv: &mut KVStore)
     *last_msg_id += 1;
     let next_msg_id = *last_msg_id;
 
+    let mut uncommitted_txns = Vec::new();
+    let mut cur_node: Option<usize> = None;
+    let mut next_tx_seq = 0;
+    let mut all_nodes = Vec::new();
+
     use message::Payload::*;
     match req.body.payload.clone() {
         Init { node_id, node_ids } => {
             eprintln!("initializing node..");
+            cur_node = Some(node_id);
+            all_nodes = node_ids;
             send_reply(next_msg_id, req, message::Payload::InitOk);
         }
         Txn { txn } => {
-            let operations = parse_op_req(txn);
-            let results = kv.apply(operations);
-            send_reply(
-                next_msg_id,
-                req,
-                message::Payload::TxnOk {
-                    txn: results_to_txn(results),
-                },
-            )
+            uncommitted_txns.push(LocalTxn {
+                seq: next_tx_seq.clone(),
+                origin: cur_node.expect("node was initiated"),
+                txn,
+                reply_to: req.src,
+                in_reply_to: req.body.msg_id.expect("message id is there"),
+            });
+            next_tx_seq += 1;
+            // let operations = parse_op_req(txn);
+            // let results = kv.apply(operations);
+            // send_reply(
+            //     next_msg_id,
+            //     req,
+            //     message::Payload::TxnOk {
+            //         txn: results_to_txn(results),
+            //     },
+            // )
+        }
+        BroadcastTxn { txns } => {
+            // todo:    1. gather txns from all other nodes
+            //          2. sort all txns
+            //          3. exec all txns and reply to those that were asked this node
         }
         _ => {
             panic!("unexpected incoming message type")
         }
     }
+}
+
+struct LocalTxn {
+    seq: usize,
+    origin: usize,
+    txn: message::PlainTxn,
+    reply_to: String,   // who asked
+    in_reply_to: usize, // original message id
 }
 
 enum OperationRequest {

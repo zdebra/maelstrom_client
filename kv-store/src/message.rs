@@ -38,8 +38,8 @@ pub struct MessageBody {
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum Payload {
     Init {
-        node_id: String,
-        node_ids: Vec<String>,
+        node_id: usize,
+        node_ids: Vec<usize>,
     },
     InitOk,
     Error {
@@ -47,16 +47,29 @@ pub enum Payload {
         text: String,
     },
     Txn {
-        txn: Vec<Vec<Option<OperationValue>>>,
+        txn: PlainTxn,
     },
     TxnOk {
-        txn: Vec<Vec<Option<OperationValue>>>,
+        txn: PlainTxn,
+    },
+
+    BroadcastTxn {
+        txns: Vec<SeqTxn>,
     },
 }
+
+pub type PlainTxn = Vec<Vec<Option<OperationValue>>>;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(untagged)]
 pub enum OperationValue {
     Integer(usize),
     String(String),
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub struct SeqTxn {
+    pub seq: u128,
+    pub txn: PlainTxn,
 }
