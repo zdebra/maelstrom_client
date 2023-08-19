@@ -1,65 +1,17 @@
 use std::{
     collections::HashMap,
     io::{self, BufRead, Write},
-    time::Duration,
-    time::SystemTime,
 };
 
 mod message;
-
-struct Node {
-    id: Option<String>,
-    all_nodes: Vec<String>,
-    receiving_dur: Duration,
-    executing_dur: Duration,
-    start_at: SystemTime,
-    msg_id: usize,
-}
-
-impl Node {
-    fn new() -> Self {
-        Self {
-            id: None,
-            all_nodes: Vec::new(),
-            receiving_dur: Duration::from_millis(500),
-            executing_dur: Duration::from_millis(500),
-            start_at: SystemTime::now(),
-            msg_id: 0,
-        }
-    }
-
-    fn init(&mut self, id: String, all_nodes: Vec<String>) {
-        eprintln!("initializing node..");
-        self.id = Some(id);
-        self.all_nodes = all_nodes;
-    }
-
-    fn is_receiving(&self) -> bool {
-        let total_dur = self.receiving_dur + self.executing_dur;
-        let since_start = self.start_at.elapsed().unwrap();
-        let cur_epoch_dur = since_start.as_nanos() % total_dur.as_nanos();
-        cur_epoch_dur < self.receiving_dur.as_nanos()
-    }
-
-    fn next_msg_id(&mut self) -> usize {
-        let msg_id = self.msg_id;
-        self.msg_id += 1;
-        msg_id
-    }
-
-    fn cur_epoch(&self) -> usize {
-        let epoch_dur = self.receiving_dur + self.executing_dur;
-        let since_start = self.start_at.elapsed().unwrap();
-        (since_start.as_nanos() / epoch_dur.as_nanos()) as usize
-    }
-}
+mod node;
 
 fn main() {
     eprintln!("started receiving messages");
     let mut last_msg_id = 0;
     let mut kv = KVStore::new();
     let mut txn_batcher = TxnBatcher::new();
-    let mut node = Node::new();
+    let mut node = node::Node::new();
     let mut broadcaster = Broadcaster::new();
     let mut receiving = true;
 
@@ -78,6 +30,8 @@ fn main() {
             receiving = true;
         }
         let msg = receive_msg();
+
+        eprintln!("received msg");
 
         process_msg(
             msg,
@@ -114,7 +68,7 @@ fn main() {
                     let msg_id = last_msg_id + 1;
                     last_msg_id += 1;
                     send_msg(message::Message {
-                        src: node.id.clone().expect("node is init"),
+                        src: node.get_id(),
                         dest: local_tx.reply_to.clone(),
                         body: message::MessageBody {
                             msg_id: Some(msg_id),
@@ -128,24 +82,25 @@ fn main() {
     }
 }
 
-fn init_broadcast(node: &mut Node, txn_batcher: &mut TxnBatcher) {
+fn init_broadcast(node: &mut node::Node, txn_batcher: &mut TxnBatcher) {
+    let all_nodes = node.get_all_nodes();
     eprintln!(
         "node {} start broadcast for {} nodes",
-        node.id.clone().expect("node is init"),
-        node.all_nodes.len()
+        node.get_id(),
+        all_nodes.len()
     );
     let txns = txn_batcher.last_batch();
-    for neighbour_i in 0..node.all_nodes.len() {
-        let neighbour = node.all_nodes.get(neighbour_i).unwrap();
+    for neighbour_i in 0..all_nodes.len() {
+        let neighbour = all_nodes.get(neighbour_i).unwrap();
         let neighbour_str = neighbour.to_string();
-        if *neighbour == node.id.clone().expect("node is initialized") {
+        if *neighbour == node.get_id() {
             continue;
         }
 
         let next_msg_id = node.next_msg_id();
 
         send_msg(message::Message::new_request(
-            node.id.clone().expect("node is init").to_string(),
+            node.get_id(),
             neighbour_str.clone(),
             next_msg_id,
             message::Payload::BroadcastTxn {
@@ -191,7 +146,7 @@ fn process_msg(
     req: message::Message,
     last_msg_id: &mut usize,
     txn_batcher: &mut TxnBatcher,
-    node: &mut Node,
+    node: &mut node::Node,
     broadcaster: &mut Broadcaster,
 ) {
     *last_msg_id += 1;
@@ -210,7 +165,7 @@ fn process_msg(
                 general_txn: GeneralTrx {
                     seq: TxnSeq {
                         seq_num: next_tx_seq,
-                        node: node.id.clone().expect("node is initialized"),
+                        node: node.get_id(),
                     },
                     txn,
                 },
@@ -220,13 +175,7 @@ fn process_msg(
         }
         BroadcastTxn { txns } => {
             let cur_epoch = node.cur_epoch();
-            broadcaster.push(
-                cur_epoch,
-                node.id
-                    .clone()
-                    .expect("node is initialized when first broadcast message arrives"),
-                txns,
-            )
+            broadcaster.push(cur_epoch, node.get_id(), txns)
         }
         _ => {
             panic!("unexpected incoming message type")
