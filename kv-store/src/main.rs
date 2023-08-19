@@ -3,6 +3,7 @@ use std::{
     io::{self, BufRead, Write},
 };
 
+mod broadcaster;
 mod message;
 mod node;
 
@@ -12,7 +13,7 @@ fn main() {
     let mut kv = KVStore::new();
     let mut txn_batcher = TxnBatcher::new();
     let mut node = node::Node::new();
-    let mut broadcaster = Broadcaster::new();
+    let mut broadcaster = broadcaster::Broadcaster::new();
     let mut receiving = true;
 
     loop {
@@ -147,7 +148,7 @@ fn process_msg(
     last_msg_id: &mut usize,
     txn_batcher: &mut TxnBatcher,
     node: &mut node::Node,
-    broadcaster: &mut Broadcaster,
+    broadcaster: &mut broadcaster::Broadcaster,
 ) {
     *last_msg_id += 1;
     let next_msg_id = *last_msg_id;
@@ -378,57 +379,8 @@ impl ToSeqTrx for Vec<LocalTxn> {
     }
 }
 
-struct Broadcaster {
-    broadcast_nodes: HashMap<usize, HashMap<String, Vec<message::SeqTxn>>>, // broadcast epoch -> node id -> txns
-    all_node_ids: Vec<String>,
-}
-
-impl Broadcaster {
-    fn new() -> Self {
-        Self {
-            broadcast_nodes: HashMap::new(),
-            all_node_ids: Vec::new(),
-        }
-    }
-
-    fn init(&mut self, node_ids: Vec<String>) {
-        self.all_node_ids = node_ids;
-    }
-
-    fn push(&mut self, epoch: usize, node_id: String, txns: Vec<message::SeqTxn>) {
-        self.broadcast_nodes
-            .entry(epoch)
-            .or_insert_with(HashMap::new)
-            .insert(node_id, txns);
-    }
-
-    fn has_all(&self, epoch: usize) -> bool {
-        self.broadcast_nodes.get(&epoch).unwrap().len() == self.all_node_ids.len()
-    }
-
-    fn get_all_general(&self, epoch: usize) -> Vec<GeneralTrx> {
-        self.broadcast_nodes
-            .get(&epoch)
-            .unwrap()
-            .iter()
-            .map(|(node_id, txns)| {
-                txns.iter()
-                    .map(|seq_txn| GeneralTrx {
-                        seq: TxnSeq {
-                            seq_num: seq_txn.seq,
-                            node: node_id.clone(),
-                        },
-                        txn: seq_txn.txn.clone(),
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .flatten()
-            .collect()
-    }
-}
-
 #[derive(Debug, Clone)]
-struct GeneralTrx {
+pub struct GeneralTrx {
     seq: TxnSeq,
     txn: message::PlainTxn,
 }
