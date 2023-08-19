@@ -54,6 +54,38 @@ impl Node {
     pub fn cur_epoch(&self) -> usize {
         let epoch_dur = self.receiving_dur + self.executing_dur;
         let since_start = self.start_at.elapsed().unwrap();
-        (since_start.as_nanos() / epoch_dur.as_nanos()) as usize
+        let a = since_start.as_nanos();
+        let b = epoch_dur.as_nanos();
+        ((a + (b - 1)) / b) as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn node_is_receiving() {
+        let mut node = Node::new();
+        node.receiving_dur = Duration::from_millis(5);
+        node.executing_dur = Duration::from_millis(5);
+        node.start_at = SystemTime::now();
+        assert!(node.is_receiving());
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(!node.is_receiving());
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(node.is_receiving());
+    }
+
+    #[test]
+    fn cur_epoch() {
+        let mut node = Node::new();
+        node.receiving_dur = Duration::from_millis(5);
+        node.executing_dur = Duration::from_millis(5);
+        node.start_at = SystemTime::now();
+        assert_eq!(node.cur_epoch(), 0);
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(node.cur_epoch(), 1);
+        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(node.cur_epoch(), 2);
     }
 }
