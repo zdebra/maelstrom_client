@@ -13,6 +13,7 @@ struct Node {
     receiving_dur: Duration,
     executing_dur: Duration,
     start_at: SystemTime,
+    msg_id: usize,
 }
 
 impl Node {
@@ -23,6 +24,7 @@ impl Node {
             receiving_dur: Duration::from_millis(500),
             executing_dur: Duration::from_millis(500),
             start_at: SystemTime::now(),
+            msg_id: 0,
         }
     }
 
@@ -34,11 +36,15 @@ impl Node {
 
     fn is_receiving(&self) -> bool {
         let total_dur = self.receiving_dur + self.executing_dur;
-        todo!()
+        let since_start = self.start_at.elapsed().unwrap();
+        let cur_epoch_dur = since_start.as_nanos() % total_dur.as_nanos();
+        cur_epoch_dur < self.receiving_dur.as_nanos()
     }
 
     fn next_msg_id(&mut self) -> usize {
-        todo!()
+        let msg_id = self.msg_id;
+        self.msg_id += 1;
+        msg_id
     }
 
     fn cur_epoch(&self) -> usize {
