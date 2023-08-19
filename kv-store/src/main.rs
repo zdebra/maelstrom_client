@@ -8,8 +8,8 @@ use std::{
 mod message;
 
 struct Node {
-    id: Option<usize>,
-    all_nodes: Vec<usize>,
+    id: Option<String>,
+    all_nodes: Vec<String>,
     receiving_dur: Duration,
     executing_dur: Duration,
     start_at: SystemTime,
@@ -28,7 +28,7 @@ impl Node {
         }
     }
 
-    fn init(&mut self, id: usize, all_nodes: Vec<usize>) {
+    fn init(&mut self, id: String, all_nodes: Vec<String>) {
         eprintln!("initializing node..");
         self.id = Some(id);
         self.all_nodes = all_nodes;
@@ -114,7 +114,7 @@ fn main() {
                     let msg_id = last_msg_id + 1;
                     last_msg_id += 1;
                     send_msg(message::Message {
-                        src: node.id.expect("node is init").to_string(),
+                        src: node.id.clone().expect("node is init"),
                         dest: local_tx.reply_to.clone(),
                         body: message::MessageBody {
                             msg_id: Some(msg_id),
@@ -131,21 +131,21 @@ fn main() {
 fn init_broadcast(node: &mut Node, txn_batcher: &mut TxnBatcher) {
     eprintln!(
         "node {} start broadcast for {} nodes",
-        node.id.unwrap(),
+        node.id.clone().expect("node is init"),
         node.all_nodes.len()
     );
     let txns = txn_batcher.last_batch();
     for neighbour_i in 0..node.all_nodes.len() {
         let neighbour = node.all_nodes.get(neighbour_i).unwrap();
         let neighbour_str = neighbour.to_string();
-        if *neighbour == node.id.expect("node is initialized") {
+        if *neighbour == node.id.clone().expect("node is initialized") {
             continue;
         }
 
         let next_msg_id = node.next_msg_id();
 
         send_msg(message::Message::new_request(
-            node.id.expect("node is init").to_string(),
+            node.id.clone().expect("node is init").to_string(),
             neighbour_str.clone(),
             next_msg_id,
             message::Payload::BroadcastTxn {
@@ -210,7 +210,7 @@ fn process_msg(
                 general_txn: GeneralTrx {
                     seq: TxnSeq {
                         seq_num: next_tx_seq,
-                        node: node.id.expect("node was initiated"),
+                        node: node.id.clone().expect("node is initialized"),
                     },
                     txn,
                 },
@@ -223,6 +223,7 @@ fn process_msg(
             broadcaster.push(
                 cur_epoch,
                 node.id
+                    .clone()
                     .expect("node is initialized when first broadcast message arrives"),
                 txns,
             )
@@ -243,12 +244,10 @@ struct LocalTxn {
 #[derive(Debug, Eq, PartialEq, Ord, Clone)]
 struct TxnSeq {
     seq_num: u128,
-    node: usize,
+    node: String,
 }
 
 use core::cmp::Ordering;
-
-use chrono::Local;
 
 impl PartialOrd for TxnSeq {
     fn partial_cmp(&self, other: &TxnSeq) -> Option<Ordering> {
@@ -431,8 +430,8 @@ impl ToSeqTrx for Vec<LocalTxn> {
 }
 
 struct Broadcaster {
-    broadcast_nodes: HashMap<usize, HashMap<usize, Vec<message::SeqTxn>>>, // broadcast epoch -> node id -> txns
-    all_node_ids: Vec<usize>,
+    broadcast_nodes: HashMap<usize, HashMap<String, Vec<message::SeqTxn>>>, // broadcast epoch -> node id -> txns
+    all_node_ids: Vec<String>,
 }
 
 impl Broadcaster {
@@ -443,11 +442,11 @@ impl Broadcaster {
         }
     }
 
-    fn init(&mut self, node_ids: Vec<usize>) {
+    fn init(&mut self, node_ids: Vec<String>) {
         self.all_node_ids = node_ids;
     }
 
-    fn push(&mut self, epoch: usize, node_id: usize, txns: Vec<message::SeqTxn>) {
+    fn push(&mut self, epoch: usize, node_id: String, txns: Vec<message::SeqTxn>) {
         self.broadcast_nodes
             .entry(epoch)
             .or_insert_with(HashMap::new)
@@ -468,7 +467,7 @@ impl Broadcaster {
                     .map(|seq_txn| GeneralTrx {
                         seq: TxnSeq {
                             seq_num: seq_txn.seq,
-                            node: *node_id,
+                            node: node_id.clone(),
                         },
                         txn: seq_txn.txn.clone(),
                     })

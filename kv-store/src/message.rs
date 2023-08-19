@@ -38,8 +38,8 @@ pub struct MessageBody {
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum Payload {
     Init {
-        node_id: usize,
-        node_ids: Vec<usize>,
+        node_id: String,
+        node_ids: Vec<String>,
     },
     InitOk,
     Error {
