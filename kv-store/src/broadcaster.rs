@@ -50,3 +50,31 @@ impl Broadcaster {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message;
+    #[test]
+    fn push_and_get() {
+        let mut broadcaster = Broadcaster::new();
+        broadcaster.init(vec!["n1".to_string(), "n2".to_string()]);
+        broadcaster.push(
+            0,
+            "n1".to_string(),
+            vec![message::SeqTxn {
+                seq: 2,
+                txn: vec![vec![
+                    Some(message::OperationValue::String("w".to_string())),
+                    Some(message::OperationValue::Integer(3)),
+                    Some(message::OperationValue::Integer(2)),
+                ]],
+            }],
+        );
+
+        let general_txn = broadcaster.get_all_general(0);
+        assert_eq!(general_txn.len(), 1);
+        assert_eq!(general_txn[0].seq.seq_num, 2);
+        assert_eq!(general_txn[0].seq.node, "n1");
+    }
+}
