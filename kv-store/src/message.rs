@@ -68,6 +68,6 @@ pub enum OperationValue {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct SeqTxn {
-    pub seq: u128,
+    pub seq: u64,
     pub txn: PlainTxn,
 }

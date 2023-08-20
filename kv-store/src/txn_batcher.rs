@@ -4,7 +4,7 @@ pub struct TxnBatcher {
     batch: Vec<LocalTxn>,
     receiving_stopped: bool,
     queue: Vec<LocalTxn>,
-    seq: u128,
+    seq: u64,
 }
 
 impl TxnBatcher {
@@ -17,7 +17,7 @@ impl TxnBatcher {
         }
     }
 
-    pub fn next_seq(&mut self) -> u128 {
+    pub fn next_seq(&mut self) -> u64 {
         let seq = self.seq;
         self.seq += 1;
         seq

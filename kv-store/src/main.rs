@@ -204,7 +204,7 @@ pub struct LocalTxn {
 
 #[derive(Debug, Eq, PartialEq, Ord, Clone)]
 struct TxnSeq {
-    seq_num: u128,
+    seq_num: u64,
     node: String,
 }
 
