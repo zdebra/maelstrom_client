@@ -37,7 +37,6 @@ impl TxnBatcher {
 
     pub fn start_receiving(&mut self) {
         self.batch = self.queue.clone();
-        self.batch.clear();
         self.queue.clear();
         self.receiving_stopped = false;
     }
@@ -47,5 +46,43 @@ impl TxnBatcher {
             .iter()
             .map(|local_txn| local_txn.clone())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn push_start_receiving() {
+        let test_local_txn = LocalTxn {
+            general_txn: crate::GeneralTrx {
+                seq: crate::TxnSeq {
+                    seq_num: 0,
+                    node: "n1".to_string(),
+                },
+                txn: Vec::new(),
+            },
+            reply_to: "n1".to_string(),
+            in_reply_to: 0,
+        };
+        let mut txn_batcher = TxnBatcher::new();
+        txn_batcher.push(test_local_txn.clone());
+        txn_batcher.push(test_local_txn.clone());
+        txn_batcher.push(test_local_txn.clone());
+        txn_batcher.stop_receiving();
+        txn_batcher.push(test_local_txn.clone());
+        txn_batcher.push(test_local_txn.clone());
+        txn_batcher.push(test_local_txn.clone());
+        txn_batcher.push(test_local_txn.clone());
+        txn_batcher.push(test_local_txn.clone());
+        assert_eq!(txn_batcher.last_batch().len(), 3);
+        txn_batcher.start_receiving();
+        txn_batcher.push(test_local_txn.clone());
+        assert_eq!(txn_batcher.last_batch().len(), 6);
+        txn_batcher.stop_receiving();
+        assert_eq!(txn_batcher.last_batch().len(), 6);
+        txn_batcher.start_receiving();
+        assert!(txn_batcher.last_batch().is_empty());
     }
 }
