@@ -4,19 +4,23 @@ use crate::{message, GeneralTrx, TxnSeq};
 
 pub struct Broadcaster {
     broadcast_nodes: HashMap<usize, HashMap<String, Vec<message::SeqTxn>>>, // broadcast epoch -> node id -> txns
-    all_node_ids: Vec<String>,
+    neighbor_node_ids: Vec<String>,
 }
 
 impl Broadcaster {
     pub fn new() -> Self {
         Self {
             broadcast_nodes: HashMap::new(),
-            all_node_ids: Vec::new(),
+            neighbor_node_ids: Vec::new(),
         }
     }
 
-    pub fn init(&mut self, node_ids: Vec<String>) {
-        self.all_node_ids = node_ids;
+    pub fn init(&mut self, node_ids: Vec<String>, node_id: String) {
+        self.neighbor_node_ids = node_ids
+            .iter()
+            .filter(|id| **id != node_id)
+            .map(|id| id.clone())
+            .collect();
     }
 
     pub fn push(&mut self, epoch: usize, node_id: String, txns: Vec<message::SeqTxn>) {
@@ -27,13 +31,17 @@ impl Broadcaster {
     }
 
     pub fn has_all(&self, epoch: usize) -> bool {
-        self.broadcast_nodes.get(&epoch).unwrap().len() == self.all_node_ids.len()
+        let epoch_broadcasts = self.broadcast_nodes.get(&epoch);
+        if epoch_broadcasts.is_none() {
+            return self.neighbor_node_ids.len() == 0;
+        }
+        epoch_broadcasts.unwrap().len() == self.neighbor_node_ids.len()
     }
 
     pub fn get_all_general(&self, epoch: usize) -> Vec<GeneralTrx> {
         self.broadcast_nodes
             .get(&epoch)
-            .unwrap()
+            .unwrap_or(&HashMap::new())
             .iter()
             .map(|(node_id, txns)| {
                 txns.iter()
@@ -58,7 +66,7 @@ mod tests {
     #[test]
     fn push_and_get() {
         let mut broadcaster = Broadcaster::new();
-        broadcaster.init(vec!["n1".to_string(), "n2".to_string()]);
+        broadcaster.init(vec!["n1".to_string(), "n2".to_string()], "n1".to_string());
         broadcaster.push(
             0,
             "n1".to_string(),

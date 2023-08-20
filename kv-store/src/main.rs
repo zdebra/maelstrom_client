@@ -1,8 +1,9 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, BufRead, Write},
+    sync::mpsc,
+    thread,
 };
-
 mod broadcaster;
 mod message;
 mod node;
@@ -16,7 +17,14 @@ fn main() {
     let mut node = node::Node::new();
     let mut broadcaster = broadcaster::Broadcaster::new();
     let mut receiving = true;
+    let mut broadcasted = HashSet::new();
 
+    let (tx, rx) = mpsc::channel();
+    // receivie messages
+    thread::spawn(move || loop {
+        let msg = receive_msg();
+        tx.send(msg).unwrap();
+    });
     loop {
         let is_node_receiving = node.is_receiving();
         let cur_epoch = node.cur_epoch();
@@ -31,19 +39,20 @@ fn main() {
             txn_batcher.start_receiving();
             receiving = true;
         }
-        let msg = receive_msg();
 
-        eprintln!("received msg");
+        if let Ok(msg) = rx.try_recv() {
+            eprintln!("received msg");
+            process_msg(
+                msg,
+                &mut last_msg_id,
+                &mut txn_batcher,
+                &mut node,
+                &mut broadcaster,
+            )
+        }
 
-        process_msg(
-            msg,
-            &mut last_msg_id,
-            &mut txn_batcher,
-            &mut node,
-            &mut broadcaster,
-        );
-
-        if !is_node_receiving && broadcaster.has_all(cur_epoch) {
+        if !is_node_receiving && broadcaster.has_all(cur_epoch) && !broadcasted.contains(&cur_epoch)
+        {
             eprintln!("got all messages for epoch {}", cur_epoch);
             let msgs_from_other_nodes = broadcaster.get_all_general(cur_epoch);
             let msgs_from_this_node = txn_batcher.last_batch();
@@ -80,6 +89,7 @@ fn main() {
                     });
                 }
             }
+            broadcasted.insert(cur_epoch);
         }
     }
 }
@@ -157,8 +167,8 @@ fn process_msg(
     use message::Payload::*;
     match req.body.payload.clone() {
         Init { node_id, node_ids } => {
-            node.init(node_id, node_ids.clone());
-            broadcaster.init(node_ids);
+            node.init(node_id.clone(), node_ids.clone());
+            broadcaster.init(node_ids, node_id);
             send_reply(next_msg_id, req, message::Payload::InitOk);
         }
         Txn { txn } => {
