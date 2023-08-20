@@ -38,5 +38,12 @@ kv_store: build
 
 kv_store_multi_node: build
 	$(MAELSTROM_BINARY) test -w txn-rw-register --bin $(KV_STORE_BINARY) --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted --log-stderr
+
+kv_store_network_partition: build
+	$(MAELSTROM_BINARY) test -w txn-rw-register --bin $(KV_STORE_BINARY) --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-uncommitted --availability total --nemesis partition --log-stderr
+
+kv_store_read_commited: build
+	$(MAELSTROM_BINARY) test -w txn-rw-register --bin $(KV_STORE_BINARY) --node-count 2 --concurrency 2n --time-limit 20 --rate 1000 --consistency-models read-committed --availability total --log-stderr
+	
 build:
 	cargo build
