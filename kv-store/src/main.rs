@@ -6,12 +6,13 @@ use std::{
 mod broadcaster;
 mod message;
 mod node;
+mod txn_batcher;
 
 fn main() {
     eprintln!("started receiving messages");
     let mut last_msg_id = 0;
     let mut kv = KVStore::new();
-    let mut txn_batcher = TxnBatcher::new();
+    let mut txn_batcher = txn_batcher::TxnBatcher::new();
     let mut node = node::Node::new();
     let mut broadcaster = broadcaster::Broadcaster::new();
     let mut receiving = true;
@@ -83,7 +84,7 @@ fn main() {
     }
 }
 
-fn init_broadcast(node: &mut node::Node, txn_batcher: &mut TxnBatcher) {
+fn init_broadcast(node: &mut node::Node, txn_batcher: &mut txn_batcher::TxnBatcher) {
     let all_nodes = node.get_all_nodes();
     eprintln!(
         "node {} start broadcast for {} nodes",
@@ -146,7 +147,7 @@ fn send_reply(msg_id: usize, reply_to: message::Message, payload: message::Paylo
 fn process_msg(
     req: message::Message,
     last_msg_id: &mut usize,
-    txn_batcher: &mut TxnBatcher,
+    txn_batcher: &mut txn_batcher::TxnBatcher,
     node: &mut node::Node,
     broadcaster: &mut broadcaster::Broadcaster,
 ) {
@@ -185,7 +186,7 @@ fn process_msg(
 }
 
 #[derive(Debug, Clone)]
-struct LocalTxn {
+pub struct LocalTxn {
     general_txn: GeneralTrx,
     reply_to: String,   // who asked
     in_reply_to: usize, // original message id
@@ -298,56 +299,6 @@ impl KVStore {
                     OperationResult::Write { key, value }
                 }
             })
-            .collect()
-    }
-}
-
-struct TxnBatcher {
-    batch: Vec<LocalTxn>,
-    receiving_stopped: bool,
-    queue: Vec<LocalTxn>,
-    seq: u128,
-}
-
-impl TxnBatcher {
-    fn new() -> Self {
-        Self {
-            batch: Vec::new(),
-            receiving_stopped: false,
-            queue: Vec::new(),
-            seq: 0,
-        }
-    }
-
-    fn next_seq(&mut self) -> u128 {
-        let seq = self.seq;
-        self.seq += 1;
-        seq
-    }
-
-    fn push(&mut self, txn: LocalTxn) {
-        if self.receiving_stopped {
-            self.queue.push(txn);
-        } else {
-            self.batch.push(txn);
-        }
-    }
-
-    fn stop_receiving(&mut self) {
-        self.receiving_stopped = true;
-    }
-
-    fn start_receiving(&mut self) {
-        self.batch = self.queue.clone();
-        self.batch.clear();
-        self.queue.clear();
-        self.receiving_stopped = false;
-    }
-
-    fn last_batch(&mut self) -> Vec<LocalTxn> {
-        self.batch
-            .iter()
-            .map(|local_txn| local_txn.clone())
             .collect()
     }
 }
